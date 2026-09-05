@@ -1,0 +1,74 @@
+# Binance Agent OS Mini Hackathon — filled from hackathon_requirement.md + what_is_agentOS.md
+# Filled 2026-09-04 by /skillz:ideation. Edit this, not the plugin's CONFIG.md.
+
+hackathon:
+  name:            Binance Agent OS Mini Hackathon
+  theme:           "We built Agent OS. You build what's next."
+  url:             https://x.com/binance/status/2094810011557838988
+  tracks:
+    - name:        "Track A — Build an AI agent with Agent OS"
+      pool:        20000 USDC
+      structure:   "1st 2000 / 2nd 1500 / 3rd 1000 / next 50 winners 300 each"
+      judged:      true
+      modules:     [data-and-analysis, trading-workflows, payment-workflows, onchain-workflows]
+    - name:        "Track B — Connect your MCP and trade"
+      pool:        40000 USDC
+      structure:   "first 10,000 eligible users x 4 USDC — completion, not judged"
+      tasks:       [spot-trade, futures-trade, "margin-or-convert-trade"]
+  format:          online
+  size:            large        # public X-reply submission + 53 paid Track A slots => high entry count
+
+sponsors:
+  - name:          Binance
+    tech:          "Binance MCP server, Exchange REST/WS APIs, Binance Pay (x402), Agentic Wallet, Web3 APIs, Skill Hub, AI Pro"
+    prize:         60000 USDC
+    must_use:      true
+target_tracks:     2            # A judged + B completion. B is the same MCP connection A needs.
+
+team:
+  size:            1            # ASSUMED — correct this if wrong, it changes the scope math
+  strengths:       [frontend, backend]
+  known_stack:     [next.js, typescript, tailwind, shadcn, node, postgres]
+  new_tech_ok:     true
+
+time:
+  total_hours:     108          # 2026-09-04 -> 2026-09-08 23:59 UTC
+  build_hours:     34           # ASSUMED solo, ~8h/day, minus video/README/submission
+  ideation_cap_min: 60
+
+requires:
+  deployed_url:    false        # not required; GitHub + video are
+  video:           true         # demo video, posted as X reply/quote-repost
+  open_source:     true         # GitHub link "if applicable" — treat as required
+  hardware:        none
+
+strategy:
+  risk:            balanced
+  domain:          ai-agents
+  avoid:           [dashboard, chatbot-wrapper, marketplace, backtesting-suite]
+  novelty_floor:   6
+
+rubric:                         # no official weights published — skill defaults
+  demo_wow:        20
+  technical:       20
+  innovation:      15
+  tech_integration: 15
+  impact:          15
+  feasibility:     15
+
+# ── HARD ELIGIBILITY GATE — verify before writing more code ──────────────────
+# Campaign excluded in: US, UK, EEA, Hong Kong, Singapore + Binance prohibited list.
+# Requires a Binance account able to create an Agentic sub-account.
+# DEMO ACCOUNTS: FALSE. Corrected 2026-09-05.
+# The official Binance MCP server has NO testnet/demo/sandbox/paper mode. Verified by
+# reading all 562 lines of developers.binance.com/en/docs/agent-native/mcp-server/agentic.md
+# — zero matches for testnet|demo|sandbox|paper|simulat. The only funding language is
+# "this is the step that spends real funds".
+# Binance Spot Testnet (testnet.binance.vision) exists with free virtual funds, but it is a
+# SEPARATE system: own API key, REST only, not wired to Agent OS or your real account.
+# CORRECTED 2026-09-05: that conclusion was too broad. It holds for the MCP server only.
+# `binance-cli` (official, github.com/binance/binance-cli, Agent OS Skill Hub) supports
+# BINANCE_API_ENV=demo|testnet. So execution through Agent OS tooling costs $0.
+# Confirmed by a live competing entry running on Binance Demo Trading and saying so.
+# => No funds needed. Execution via binance-cli demo; market data via MCP.
+eligibility_verified: true    # confirmed by user 2026-09-04: eligible region
