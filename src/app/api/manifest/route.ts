@@ -10,6 +10,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { serviceManifest } from "@/lib/service";
+import { mcpMode } from "@/lib/mcp";
 import { network, payTo, price, rail } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
@@ -22,8 +23,12 @@ export async function GET(request: NextRequest) {
   // host and the origin genuinely cannot be trusted.
   const baseUrl = process.env.PUBLIC_BASE_URL || request.nextUrl.origin;
 
+  // The Agent OS block reports the live connection state rather than a static
+  // boast: if the MCP token has expired, the catalogue says "not connected" and
+  // why. A manifest that claims an integration it no longer has is worse than
+  // one that admits the gap.
   return NextResponse.json(
-    serviceManifest({ baseUrl, price, network, payTo, rail }),
+    serviceManifest({ baseUrl, price, network, payTo, rail, mcp: mcpMode() }),
     { headers: { "cache-control": "public, max-age=60" } },
   );
 }

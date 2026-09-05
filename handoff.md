@@ -343,9 +343,16 @@ Verify the tick does not exceed the function timeout in production.
 - Follow `@binance` on X, repost the announcement, then **reply or quote-repost
   with the submission** — demo video plus GitHub link.
 - Complete the official survey while logged into Binance.
-- **This is not a git repository yet.** `git init`, commit, push to GitHub. Do
-  this well before the deadline, not at the end.
-- `README.md` is still the Next.js default. It needs rewriting.
+- **CORRECTED 2026-09-05 (judge review):** it *is* a git repository now and it is
+  pushed — `origin/main` = `92fa767`, remote `github.com/MikeMoulder/Omon-AI`.
+  But **the push is stale.** `indicators.ts`, `strategy.ts`, `service.ts`, the
+  manifest route and the three newest smoke scripts are staged and **not on
+  GitHub**. The verified ren-ai port and the discovery manifest — the two best
+  things in this project — do not exist to anyone who clicks the link. Push.
+  Also: open that URL in a logged-out window and confirm the repo is public.
+- `README.md` is still the Next.js default **and it is committed and pushed**. A
+  judge clicking through from the video currently reads "bootstrapped with
+  create-next-app."
 
 **Put this table near the top of the README and say it out loud in the video:**
 
@@ -364,6 +371,39 @@ Both are true and both are Agent OS — keep them straight.
 
 ---
 
+## 8b. Judge review — 2026-09-05
+
+Full hostile review: **`assets/judge-scorecard.md`**. Consensus **5.2**, readiness
+**NOT READY**. Read it before picking up the next task; it reorders §7.
+
+The finding that matters most, because nothing in §7 currently addresses it:
+
+**Agent OS is not in the product.** There is no MCP call anywhere in `src/`. The
+only MCP artifact is `.mcp.json` — six lines wiring *Claude Code* to Binance's
+server, which is the builder's IDE, not the shipped thing. `exchange.ts` is
+hand-rolled REST + HMAC. At a hackathon named "Build an AI agent with Agent OS",
+a judge who greps for MCP finds nothing. **Route `getPrices` through the Binance
+MCP server** (~1.5h) — that is the highest-leverage work left, and it depends on
+the open question below about server-side auth.
+
+Second: **`assets/idea-brief.md` still grades Binance MCP "Essential — live prices,
+sub-account balances, placing the actual spot order."** All three are false in the
+code. §8 already corrected the order half; the brief never got the update, and the
+prices half is wrong too. Fix that line before it reaches the video or the survey —
+a fabricated integration claim costs more than a missing one.
+
+Third: **the X steps and the Binance survey are unverified.** Fifteen minutes, no
+code, and they are how working projects get disqualified. Do them first.
+
+Also confirmed working during the review, so stop re-testing them: `next build`
+exits 0 clean, `/api/manifest` and `/.well-known/x402` return 200, `/api/intel`
+returns a complete 402 challenge with the redacted preview.
+
+One new trap found: **on a cold start the 402 preview serves fixture rows** —
+`https://example.com/treasury-stablecoin-delay`. No persistence means every Vercel
+cold start does this on the exact URL a curious judge probes. Warm the cache on
+boot, or ship a JSON file.
+
 ## 9. Open questions
 
 **Can Claude Desktop actually pay a 402?** This is the biggest remaining risk,
@@ -374,11 +414,39 @@ outside client and not run in-process, and the wording changes from "Claude
 Desktop pays" to "an external agent pays". Do not describe it as Claude Desktop
 until it is proven.
 
-**Can a Vercel app authenticate to Binance MCP server-side?** The MCP connection
-here was OAuth'd through Claude Code. Whether a deployed Next.js app can do the
-same is unverified. If yes, the console's prices flow through MCP. If no, MCP
-appears in the demo via Claude Code or Claude Desktop and the app uses REST.
-Either is honest; it only changes the wording.
+**~~Can a Vercel app authenticate to Binance MCP server-side?~~ ANSWERED
+2026-09-05 — yes, with one human click. No headless path exists.** Probed
+`agent.binance.com` directly:
+
+```text
+POST /mcp/agentic  (no auth)      -> 401, WWW-Authenticate: Bearer
+POST /mcp/agentic  (X-MBX-APIKEY) -> 401   <- exchange keys do NOT work on MCP
+GET  /register                    -> 404   <- no dynamic client registration
+
+/.well-known/oauth-authorization-server:
+  authorization_endpoint            accounts.binance.com/agentic-oauth/authorize
+  token_endpoint                    accounts.binance.com/oauth-agentic/token
+  grant_types_supported             ["authorization_code"]      <- only
+  token_endpoint_auth_methods       ["none"]                    <- public client
+  code_challenge_methods            ["S256"]                    <- PKCE
+  client_id_metadata_document       true
+```
+
+What each line means for us:
+
+- **`token_endpoint_auth_methods: ["none"]` plus `client_id_metadata_document:
+  true`** — we need no client secret and no developer-portal signup. The
+  `client_id` is just a URL we host that returns a small JSON document. Omon can
+  register itself as an OAuth client by serving a file.
+- **`grant_types_supported` is `authorization_code` and nothing else** — there is
+  no `client_credentials`, so a server can never mint a token on its own, and no
+  `refresh_token`, so a token probably cannot be renewed programmatically.
+- **Net:** a human authorises once in a browser; the resulting bearer token is
+  then usable from any server, including a Vercel function. Token lifetime is
+  unmeasured — **measure it before relying on it on camera.**
+
+So MCP in the deployed product is possible, and the price of it is one click.
+Plan: section 11.
 
 **An open 0.01 BNB futures long** is sitting on the demo account from a test.
 Harmless. Close with a reduceOnly SELL if it bothers anyone.
@@ -397,3 +465,298 @@ the same sentence. No filler, no preamble, no recap.
 They are sharp and they check things — they caught a fabricated price claim and
 found Spot Demo Mode when the docs had been read wrong. **Verify before
 asserting, and say plainly when something turns out to be wrong.**
+
+---
+
+## 11. Agent OS integration plan
+
+*Written 2026-09-05 after the judge review. This is the answer to the scorecard's
+single biggest finding: **Agent OS is not in the product.***
+
+### The shape of the problem
+
+Agent OS is an umbrella over several surfaces. Where Omon stands on each:
+
+| Agent OS surface | Reachable? | In the product today |
+|---|---|---|
+| Binance Exchange APIs | yes | **YES** — `exchange.ts`: orders, prices, candles |
+| Binance MCP Server | yes, one OAuth click | **NO** — zero calls in `src/` |
+| Binance Pay / B402 | no — needs a business entity | no, and correctly so |
+| Skill Hub / `binance-cli` | yes, npm `binance-cli@1.0.0` | no |
+| Agentic Wallet | needs a funded agentic sub-account | no |
+| Web3 APIs | yes | no |
+| Binance AI Pro | consumer app, not integrable | n/a |
+
+We already use one Agent OS surface properly. So the problem is narrower than
+"no Agent OS": it is **"no MCP, at a hackathon whose judges will grep for MCP."**
+Fixing MCP fixes the finding. Chasing the other surfaces does not.
+
+### The honest split, decided
+
+**Reads go through MCP. Writes stay on Demo Mode REST.** Not laziness — the MCP
+OAuth token belongs to the real Binance account (UID 1273695308). An order placed
+through MCP spends real money. Demo Mode is a different host, different keys, no
+real funds. So:
+
+| | Rail | Why |
+|---|---|---|
+| Prices, candles, account state | **Binance MCP** | free, read-only, real mainnet data |
+| Order execution | Binance Spot Demo Mode REST | real matching engine, no real money |
+
+Say this in the video: *"Market data and account state come through the Binance
+MCP server. Orders execute on Binance Spot Demo Mode, which is the real matching
+engine with demo funds."* Both halves are then true, which is what is not true
+today.
+
+### The build, in layers
+
+Each layer ships on its own and leaves the project working. Stop anywhere and
+nothing is half-done.
+
+```text
+L0  Stop the false claims                                        0.2h   FREE
+    - exchange.ts lines 9 and 28 say prices "also come from the Binance MCP
+      server". They do not. Delete or correct.
+    - idea-brief.md "Why this technology": the Binance MCP row still reads
+      "Essential - live prices, sub-account balances, placing the actual spot
+      order." All three false. Rewrite to the split above.
+    Do this first regardless of everything below. A wrong claim costs more
+    than a missing feature.
+
+L1  src/lib/mcp.ts - the MCP seam                                1.5h
+    Same contract as every other seam: one file owns the wire, exports a
+    mode() function, degrades instead of throwing.
+      mcpMode()  -> {mode:"live"|"off", reason}
+      mcpTools() -> tool list, cached
+      mcpCall(name, args)
+    Transport is Streamable HTTP: POST JSON-RPC to BINANCE_MCP_URL with
+    `Authorization: Bearer $BINANCE_MCP_ACCESS_TOKEN` and `Accept:
+    application/json, text/event-stream`, keeping the `Mcp-Session-Id` header
+    the initialize response returns. Sequence: initialize ->
+    notifications/initialized -> tools/call. Roughly 90 lines hand-rolled,
+    which matches how exchange.ts is written. @modelcontextprotocol/sdk@1.30.0
+    is the alternative if the SSE framing fights back.
+    Token for now: minted by hand, pasted into .env.local. L3 automates it.
+
+L2  Route real product paths through it                          1.0h
+    In exchange.ts - MCP first, REST as the recorded fallback:
+      getPrices()   -> spot_tickerPrice
+      getCandles()  -> spot_klines        <- the important one
+      getBalances() -> spot_getAccount    <- real account, read-only
+    getCandles is the one that matters. The ren-ai indicator port is the best
+    engineering in this project, and routing its candles through MCP means
+    Agent OS feeds the analysis rather than decorating a price label. That is
+    the difference between "we called an MCP tool once" and "the strategy runs
+    on Agent OS data".
+    Fallback rule is the existing one: never silent. Record why it fell back,
+    show it on the console, fail the smoke test in live mode.
+
+L3  Omon authenticates itself                                    1.5h   OPTIONAL
+    /.well-known/oauth-client  -> our client metadata document; this URL is
+                                  our client_id, so no signup is needed
+    GET /api/mcp/connect       -> PKCE challenge, redirect to Binance consent
+    GET /api/mcp/callback      -> exchange code, store token
+    Buys two things: the token stops being a hand-pasted secret, and the demo
+    gets a beat - click Connect, Binance's own consent screen appears, come
+    back, the console's seam flips from REST to MCP live on camera.
+    Cheaper substitute if the clock is tight (~0.5h): scripts/mcp-auth.ts runs
+    the same PKCE flow on localhost and prints a token to paste. Same proof,
+    no demo beat.
+
+L4  Make it findable - this is the judging half                  0.5h
+    - service.ts: give each endpoint a `poweredBy` field naming the Agent OS
+      calls behind it, e.g. ["binance-mcp:spot_klines",
+      "binance-mcp:spot_tickerPrice"]. The manifest then publishes our Agent OS
+      usage at /.well-known/x402, where a judge is already looking.
+    - Console status row, beside the existing seam badges:
+        AGENT OS   MCP live - spot_tickerPrice, spot_klines, spot_getAccount
+        EXCHANGE   Spot Demo Mode REST (writes)
+    - scripts/mcp-smoke.ts, same shape as the other smokes: list tools, call
+      one, assert live mode. This is evidence a judge can run.
+    - README: an "Agent OS surfaces used" section with the table above.
+```
+
+```text
+Minimum that fixes the finding   L0 + L1 + L2 + L4      3.2h
+With the self-connect demo beat  + L3                   4.7h
+```
+
+The scorecard budgeted 1.5h for this. 1.5h buys L0 + L1 only — a seam nobody can
+see. 3.2h is the honest number for the finding actually being fixed, and it
+should come out of console time rather than being added on top.
+
+### Risks
+
+**Token lifetime is unknown and there is no refresh grant.** If it is an hour, a
+deployed demo goes stale. Two mitigations, do both: the L2 fallback means a dead
+token degrades to REST with an honest on-screen reason instead of a 500, and the
+video gets recorded soon after a token is minted.
+
+**The MCP token is a live credential to the real account.** It is not the Demo
+Mode key. Never commit it, keep it in Vercel env only, and prefer an Agentic
+sub-account with limits if one can be created without funding it.
+
+**MCP may be slower than REST on the tick.** Give it a timeout the way
+`EXCHANGE_TIMEOUT_MS` does and fall back rather than blocking the tick.
+
+### Not doing, and why
+
+```text
+Orders through MCP        real money on the real account. The read/write split
+                          is the point, not a compromise
+Agentic Wallet            needs funding. Same reason Track B is dropped
+binance-cli / Skill Hub   a second surface proves nothing the first does not,
+                          and it means a subprocess inside a serverless
+                          function. Only revisit if MCP auth turns out to be
+                          impossible, which it is not
+Web3 APIs                 no product path needs on-chain data
+B402                      business entity. Closed 2026-09-04
+```
+
+---
+
+## 11b. Agent OS integration — BUILT 2026-09-05
+
+*Section 11 is the plan. This is what shipped, what the probes found, and the
+two decisions that changed along the way.*
+
+### Status: L0, L1, L2, L4 done. Build green, 21 discovery checks still pass.
+
+```text
+L0  false claims removed                                          DONE
+    exchange.ts header rewritten; the two comments claiming prices "also come
+    from the Binance MCP server" are gone (they now describe the real split).
+    idea-brief.md's MCP row rewritten and marked as a correction.
+
+L1  src/lib/mcp.ts                                                DONE
+    mcpMode / mcpTools / resolveTool / mcpCall / mcpHealth / mcpUsage
+    Streamable HTTP JSON-RPC, hand-rolled. Handles both response framings
+    (application/json and SSE), keeps Mcp-Session-Id, sends
+    notifications/initialized before any call.
+
+L2  reads routed through MCP                                      DONE
+    getPrices()  -> spot_tickerPrice   (per symbol — see the trap below)
+    getCandles() -> spot_klines        (the strategy's input)
+    getAgentOsAccount() -> spot_getAccount  (new; read-only)
+    placeOrder() unchanged, still Spot Demo Mode REST.
+
+L4  made findable                                                 DONE
+    /.well-known/x402 carries an `agentOs` block naming the surfaces, the
+      tools and the execution policy, with LIVE connection status.
+    Each endpoint carries `poweredBy` naming the calls behind it.
+    GET /api/agent-os — connection state, tools resolved, token health, and
+      which rail each read actually used last.
+    scripts/mcp-smoke.ts — fails if data came over the REST fallback.
+    README.md rewritten: the create-next-app boilerplate is gone.
+
+Enablers built because L1/L2 are untestable without them:
+    scripts/mcp-auth.ts            one-time PKCE mint, writes .mcp-token.json
+    /api/oauth-client              our OAuth client metadata document,
+                                   aliased to /.well-known/oauth-client
+```
+
+### What the probes actually found
+
+**Binance MCP is OAuth-only and there is no headless path to a first token.**
+Exchange API keys return 401 (`X-MBX-APIKEY` is not an MCP credential).
+`grant_types_supported` is `["authorization_code"]` and nothing else. But
+`client_id_metadata_document_supported: true` means there is no developer-portal
+registration either — the app publishes its own client metadata and that URL is
+its `client_id`.
+
+**`spot_klines` returns the identical array-of-arrays shape as `/api/v3/klines`.**
+Verified live. Both rails therefore share `decodeKlines()` in `exchange.ts`, so
+the indicator maths cannot drift between them. This is what makes routing the
+strategy's candles through MCP a swap rather than a rewrite.
+
+**NEW TRAP — the `symbols` batch parameter is unusable through MCP.**
+`spot_tickerPrice` with `symbols: ["BTCUSDT","BNBUSDT"]` fails with
+`-1100 Illegal characters found in parameter 'symbols'`. This is the same trap
+as section 6 ("Binance rejects the symbols array if there is a space after the
+comma") and it survives the MCP layer *because the MCP layer is what serialises
+the array* — there is no way to hand-build the string from our side. So
+`getPrices()` calls one symbol per request on the MCP path and keeps the batch
+form only for the REST fallback. Single-symbol calls work fine.
+
+**`analysis_getTokenAiReport` exists but returns nothing usable.** Binance
+publishes an AI token-report tool, and it looked like a genuine second source
+for the Intel Agent. Called for both BTC and BNB it answers
+`{"code":"000000","success":true}` with no report body. The published portfolio
+workflow says an absent report comes back as `available=false`, so this is
+"no report right now", not a bug in our call. **Not built on. Do not put it in
+the video or the survey.**
+
+**The one published MCP Skill is `portfolio-asset-analysis-workflow`** — a
+read-only workflow using `getMainAccountAsset` + `getTokenAiReport`. It depends
+on the report tool above and on holdings we do not have, so it is not useful
+here. Recorded so nobody re-researches it.
+
+### Two decisions that changed from section 11
+
+**1. `getBalances()` was NOT repointed at MCP.** Section 11 said to route it.
+That would have been wrong: `getBalances()` reads the Demo account that orders
+actually hit, and `spentToday()` reconciles the budget ledger against it.
+Pointing it at the operator's mainnet account would have made the ledger
+describe a balance no trade ever touched. Instead `getAgentOsAccount()` is a new,
+separate read for the Agent OS panel, and the console must label the two
+accounts separately rather than summing them.
+
+**2. The token lives in a FILE, not an env var** — `.mcp-token.json`, gitignored,
+mode 600. This is because Omon runs continuously on a VPS: a process that can
+rewrite its own credential can renew unattended, and an env var cannot be changed
+from inside the process that needs it. `rpc()` refreshes proactively when the
+token is near expiry and retries once on a 401.
+
+**Whether that renewal actually works is still unmeasured.** The server does not
+advertise a `refresh_token` grant, so it may refuse. `scripts/mcp-auth.ts` prints
+`expires_in` and whether a refresh token was issued — **read those two lines when
+you run it.** If no refresh token comes back, the browser step must be repeated
+each time the token expires, and that cadence needs to be known before the demo,
+not discovered during it.
+
+### What the VPS changes elsewhere
+
+The VPS is not just a deployment detail; it retires three separate risks:
+
+- **Scorecard finding 7 (cold start serves fixtures on the judge path) is gone.**
+  A long-lived process keeps `intel-cache.ts` warm, so the 402 preview stops
+  answering with `example.com` fixture rows. Persistence is still worth having,
+  but it is no longer the thing standing between a judge and a bad first
+  impression.
+- **The Vercel function timeout on the tick is moot.** A VPS can run the 15-40s
+  tick as a real interval, so the tick no longer has to be designed around a
+  serverless ceiling.
+- **MCP token renewal becomes possible at all.** On serverless it would not have
+  been.
+
+Update section 5's deployment assumption and section 7 item 6 accordingly —
+"deploy to Vercel" is now "run on the VPS", and `PUBLIC_BASE_URL` must be set to
+the VPS origin or the OAuth mint cannot even start.
+
+### Verify it in one minute
+
+```bash
+npx tsc --noEmit && npx next build          # green as of 2026-09-05
+npx tsx scripts/mcp-smoke.ts                # says OFF until a token is minted
+npx tsx scripts/discovery-smoke.ts http://localhost:3111   # 21 checks, still pass
+curl localhost:3000/api/agent-os
+curl localhost:3000/.well-known/x402 | jq .agentOs
+```
+
+**Known-good without a token:** every MCP path degrades to REST and records the
+reason. Tested with a deliberately bogus token — 401 produces a clean
+`McpError`, `getPrices` and `getCandles` return correct live values over REST,
+and `mcpUsage()` reports `via: "rest"` with the reason. Nothing fails silently.
+
+### Still open
+
+```text
+- Mint a real token and re-run mcp-smoke.ts. Until that happens the MCP path is
+  correct-by-construction and proven only on its failure path.
+- Measure the token lifetime and whether a refresh token is issued.
+- PUBLIC_BASE_URL must point at the VPS origin before scripts/mcp-auth.ts will
+  run at all — it refuses a loopback client_id, because Binance fetches that URL
+  server-side and cannot reach your laptop.
+- The console status row (section 11 L4) has no console to live in yet.
+  /api/agent-os is the data source waiting for it.
+```

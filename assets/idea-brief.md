@@ -68,13 +68,23 @@ before this. That is the whole project.
 | ~~**Binance x402 / b402**~~ | ~~Same, on BNB Chain~~ | **UNAVAILABLE** — the B402 merchant rail requires an Entity (business) Binance account. Confirmed 2026-09-04, see `assets/spike-notes.md`. Code seam is built and switches with one env var if that ever changes | — |
 | **Self-published discovery** | `/.well-known/x402` — a free catalogue naming the service, its tags, price, chain, payee and response shapes. The 402 challenge carries the same metadata plus a redacted sample | Valuable | An agent handed the URL learns nothing and cannot decide whether to buy. Replaces the Bazaar listing we cannot have |
 | ~~**B402 Bazaar**~~ | ~~Discovery~~ | **UNAVAILABLE** — Bazaar indexes off a confirmed B402 settle, which needs the merchant rail. Omon publishes its own catalogue instead | — |
-| **Binance MCP** | Live prices, sub-account balances, placing the actual spot order | Essential | The signal is an opinion nobody acted on. No trade, no proof |
-| **Spot Demo Mode** | The account the orders actually hit — `demo-api.binance.com`, real matching engine, demo funds. Chosen over Spot Testnet because it mirrors the live exchange and is Binance's own branded product | Valuable | Trading gets unsafe or costs real money, and the safety answer in Q&A gets weaker |
+| **Binance MCP** | Every market read: live prices, and the OHLCV candles the technical engine runs on, plus account state. `spot_tickerPrice`, `spot_klines`, `spot_getAccount`, over OAuth. **Reads only — orders do not go through MCP** (see the Spot Demo Mode row for why) | Essential | The chart half of every signal loses its data source. Omon degrades to news-only opinion |
+| **Spot Demo Mode** | The account the orders actually hit — `demo-api.binance.com`, real matching engine, demo funds. Chosen over Spot Testnet because it mirrors the live exchange and is Binance's own branded product. **This is why orders do not run over MCP:** the MCP token authorises the operator's real account, so an order placed there would spend real money | Valuable | Trading gets unsafe or costs real money, and the safety answer in Q&A gets weaker |
 
 Every live row is Essential or Valuable. Two rows were struck on 2026-09-04 when
 merchant onboarding turned out to need a business entity — the payment rail is the
-open x402 standard instead of Binance's own. Binance MCP is now the load-bearing
-Binance integration: live prices and the real order.
+open x402 standard instead of Binance's own.
+
+**Two Binance Agent OS surfaces carry this project, and the split between them is
+deliberate:** every market read goes through the **Binance MCP server** — including
+the candles the ported ren-ai indicator engine computes on, so Agent OS data drives
+the analysis rather than decorating a price label — while **order execution** goes
+through the **Binance Exchange API on Spot Demo Mode**. Reads are free and safe on
+a real account; writes are not. `npx tsx scripts/mcp-smoke.ts` proves the MCP half,
+and `GET /api/agent-os` reports it live, including when the connection is down.
+
+*Corrected 2026-09-05. An earlier version of this row claimed MCP placed the spot
+order. It never did, and it should not.*
 
 ## The aha moment
 

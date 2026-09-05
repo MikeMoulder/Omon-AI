@@ -44,5 +44,9 @@ next-env.d.ts
 .spike-keys.json
 .env.local
 
+# Binance MCP OAuth token. Authorises the REAL Binance account (canTrade: true),
+# and the process rewrites this file when it renews, so it must never be tracked.
+.mcp-token.json
+
 # ...but the template must ship: it is how a judge sets the project up.
 !.env.example

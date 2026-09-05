@@ -5,12 +5,23 @@
  * order ids and free test funds. Reads that need no key (prices) work against
  * the same host, so nothing here requires funding to develop against.
  *
- * The Binance REST API is one of the surfaces Binance lists under Agent OS.
- * Prices for the console also come from the Binance MCP server, which is the
- * newer surface; this file is the write path.
+ * Two Binance Agent OS surfaces meet in this file, and the split between them
+ * is deliberate:
+ *
+ *   reads  (prices, candles)  Binance MCP first — see src/lib/mcp.ts — with the
+ *                             REST calls below as the recorded fallback.
+ *   writes (orders)           REST only, against Spot Demo Mode.
+ *
+ * Writes never go through MCP. The MCP token authorises the operator's real
+ * Binance account, so an order placed there would spend real money; Demo Mode
+ * is a different host with different keys and no real funds. Keep it that way.
+ *
+ * Every fallback from MCP to REST is recorded via `noteMcpUse()` and shown on
+ * the console. A silent fallback is the trap in handoff.md section 6.
  */
 import crypto from "node:crypto";
 import type { OrderResult, Candle } from "@/lib/types";
+import { AGENT_OS_TOOLS, mcpCall, mcpEnabled, mcpMode, noteMcpUse } from "@/lib/mcp";
 
 // Binance SPOT Demo Mode, not Spot Testnet. Both are free and fund-free, but
 // Demo Mode mirrors the live exchange — same features, same exchange filters,
@@ -20,13 +31,14 @@ import type { OrderResult, Candle } from "@/lib/types";
 const BASE = process.env.BINANCE_SPOT_BASE_PATH ?? "https://demo-api.binance.com";
 
 /**
- * Where prices are read from — separate from where orders go, so the two can be
- * pointed at different hosts if that is ever needed.
+ * Where prices are read from when MCP is unavailable — separate from where
+ * orders go, so the two can be pointed at different hosts if that is needed.
  *
  * Defaults to the execution host, which is accurate: Demo Mode order books track
  * the live exchange. Verified 2026-09-05 that BTCUSDT agreed within a cent
- * across mainnet, testnet and Binance MCP. `https://data-api.binance.vision` is
- * the public mainnet alternative if a host is ever blocked in production.
+ * across mainnet, testnet and Binance MCP, so the fallback does not move the
+ * numbers. `https://data-api.binance.vision` is the public mainnet alternative
+ * if a host is ever blocked in production.
  */
 const PRICE_BASE = process.env.BINANCE_PRICE_BASE_PATH ?? BASE;
 const TIMEOUT_MS = Number(process.env.EXCHANGE_TIMEOUT_MS ?? 10_000);
@@ -46,6 +58,19 @@ export class ExchangeError extends Error {
   constructor(message: string, readonly code?: number) {
     super(message);
     this.name = "ExchangeError";
+  }
+}
+
+/**
+ * Raised when MCP answers successfully but with something the caller cannot
+ * use. Separate from McpError so the fallback record distinguishes "the rail is
+ * down" from "the rail worked and gave us the wrong thing" — they need
+ * different fixes and the console should not blur them.
+ */
+class McpShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpShapeError";
   }
 }
 
@@ -111,14 +136,43 @@ async function signedRequest(
 }
 
 /**
- * Latest price for each symbol. Public — no key, works before funding.
+ * Latest price for each symbol. Binance MCP first, REST as the fallback.
  *
- * Built as a raw string rather than URLSearchParams: Binance rejects the
- * `symbols` array if the JSON has a space after the comma, and the standard
- * serializers put one there.
+ * ONE SYMBOL PER CALL on the MCP path, deliberately. The `symbols` array
+ * parameter is unusable through MCP: the server serialises the array with a
+ * space after each comma and Binance rejects that with `-1100 Illegal
+ * characters found in parameter 'symbols'`. This is the same trap documented in
+ * handoff.md section 6 for the REST path, and it survives the MCP layer because
+ * the MCP layer is what does the serialising. Verified 2026-09-05.
+ *
+ * The REST fallback keeps the batch form, where the string is built by hand and
+ * the space never appears.
  */
 export async function getPrices(symbols: string[]): Promise<Record<string, string>> {
   if (symbols.length === 0) return {};
+
+  if (mcpEnabled()) {
+    try {
+      const rows = await Promise.all(
+        symbols.map(async (symbol) => {
+          const row = (await mcpCall([...AGENT_OS_TOOLS.prices], { symbol })) as {
+            symbol: string;
+            price: string;
+          };
+          return [row.symbol, row.price] as const;
+        }),
+      );
+      noteMcpUse("prices", { via: "mcp", tool: "spot_tickerPrice" });
+      return Object.fromEntries(rows);
+    } catch (err) {
+      // Never fatal. Prices exist on both rails, so a dead token or a slow
+      // gateway must not stop the tick — but it must not pass unnoticed either.
+      noteMcpUse("prices", { via: "rest", reason: String(err) });
+      console.warn("[exchange] mcp prices unavailable, falling back to REST:", err);
+    }
+  } else {
+    noteMcpUse("prices", { via: "rest", reason: mcpOffReason() });
+  }
 
   const encoded = encodeURIComponent(`["${symbols.join('","')}"]`);
   const rows = (await request(
@@ -137,8 +191,39 @@ export function candleErrors(): Record<string, string> {
   return { ...lastCandleErrors };
 }
 
+/** Raw kline rows are the same array-of-arrays on both rails. Decoded once. */
+type RawKline = [number, string, string, string, string, string, ...unknown[]];
+
+function decodeKlines(rows: RawKline[]): Candle[] {
+  return rows
+    .slice(0, -1)
+    .map(([t, o, h, l, c, v]) => ({
+      t,
+      o: Number(o),
+      h: Number(h),
+      l: Number(l),
+      c: Number(c),
+      v: Number(v),
+    }))
+    .filter((k) => Number.isFinite(k.c) && Number.isFinite(k.h) && Number.isFinite(k.l));
+}
+
+/** Why MCP is not being used, for the fallback record. Read per call, not once
+ *  at module scope, so a token added to the environment is picked up without a
+ *  restart. */
+function mcpOffReason(): string {
+  return mcpMode().reason;
+}
+
 /**
- * OHLCV candles for one symbol. Public endpoint — no key, no signature.
+ * OHLCV candles for one symbol. Binance MCP first, REST as the fallback.
+ *
+ * This is the load-bearing MCP call in the product, not the price label: these
+ * candles are what `src/lib/indicators.ts` and `src/lib/strategy.ts` run on, so
+ * the technical half of every signal Omon sells is computed from data fetched
+ * through Binance Agent OS. Verified 2026-09-05 that `spot_klines` returns the
+ * identical array-of-arrays shape as `/api/v3/klines`, which is why both rails
+ * share `decodeKlines()` and the maths cannot drift between them.
  *
  * `limit` must cover the slowest indicator: the strategy needs emaSlow (200)
  * bars plus one, so anything under ~250 silently produces no snapshot at all.
@@ -156,13 +241,40 @@ export async function getCandles(args: {
   const interval = args.interval ?? CANDLE_INTERVAL;
   const limit = Math.min(1000, Math.max(1, args.limit ?? 1000));
 
-  let rows: Array<[number, string, string, string, string, string, ...unknown[]]>;
+  if (mcpEnabled()) {
+    try {
+      const mcpRows = (await mcpCall([...AGENT_OS_TOOLS.candles], {
+        symbol: args.symbol,
+        interval,
+        limit,
+      })) as RawKline[];
+
+      if (!Array.isArray(mcpRows)) throw new McpShapeError("spot_klines did not return an array");
+
+      const candles = decodeKlines(mcpRows);
+      // A short series is not an error, but it silently disables every slow
+      // indicator (emaSlow needs 200 bars). Treat it as a miss so the REST path
+      // gets its chance rather than handing the strategy a stub.
+      if (candles.length === 0) throw new McpShapeError("spot_klines returned no usable candles");
+
+      noteMcpUse("candles", { via: "mcp", tool: "spot_klines" });
+      delete lastCandleErrors[args.symbol];
+      return candles;
+    } catch (err) {
+      noteMcpUse("candles", { via: "rest", reason: String(err) });
+      console.warn(`[exchange] mcp candles for ${args.symbol} unavailable, falling back:`, err);
+    }
+  } else {
+    noteMcpUse("candles", { via: "rest", reason: mcpOffReason() });
+  }
+
+  let rows: RawKline[];
   try {
     rows = (await request(
       `/api/v3/klines?symbol=${encodeURIComponent(args.symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
       undefined,
       PRICE_BASE,
-    )) as Array<[number, string, string, string, string, string, ...unknown[]]>;
+    )) as RawKline[];
   } catch (err) {
     // Degrade, do not throw. An empty series makes technicalSnapshot() return
     // null, which the Signal Agent already handles as "decide on news alone" —
@@ -176,25 +288,68 @@ export async function getCandles(args: {
 
   delete lastCandleErrors[args.symbol];
 
-  return rows
-    .slice(0, -1)
-    .map(([t, o, h, l, c, v]) => ({
-      t,
-      o: Number(o),
-      h: Number(h),
-      l: Number(l),
-      c: Number(c),
-      v: Number(v),
-    }))
-    .filter((k) => Number.isFinite(k.c) && Number.isFinite(k.h) && Number.isFinite(k.l));
+  return decodeKlines(rows);
 }
 
-/** Non-zero spot balances on the account the keys belong to. */
+/**
+ * Non-zero spot balances on the DEMO account the trading keys belong to.
+ *
+ * Stays on REST on purpose. This is the account orders actually hit, and the
+ * budget ledger is reconciled against it — reading a different account here
+ * would make `spentToday()` describe a balance no trade ever touched. The
+ * Agent OS view of the operator's real account is `getAgentOsAccount()` below,
+ * and the two must not be confused for one another.
+ */
 export async function getBalances(): Promise<Record<string, string>> {
   const account = (await signedRequest("/api/v3/account", { omitZeroBalances: "true" })) as {
     balances: Array<{ asset: string; free: string }>;
   };
   return Object.fromEntries(account.balances.map((b) => [b.asset, b.free]));
+}
+
+/**
+ * The operator's real Binance account, read through Binance MCP. READ ONLY.
+ *
+ * A different account from `getBalances()` — that one is Spot Demo Mode, this
+ * one is mainnet — so the console must label them separately rather than adding
+ * them up. Returned for the Agent OS status panel: it is what proves the MCP
+ * connection is authenticated rather than merely reachable, since every other
+ * MCP call in this file hits public market data that needs no token.
+ *
+ * Returns null instead of throwing when MCP is off or the token has expired.
+ */
+export async function getAgentOsAccount(): Promise<{
+  uid: number;
+  accountType: string;
+  canTrade: boolean;
+  balances: Record<string, string>;
+} | null> {
+  if (!mcpEnabled()) {
+    noteMcpUse("account", { via: "rest", reason: mcpOffReason() });
+    return null;
+  }
+
+  try {
+    const account = (await mcpCall([...AGENT_OS_TOOLS.account], { omitZeroBalances: true })) as {
+      uid: number;
+      accountType: string;
+      canTrade: boolean;
+      balances?: Array<{ asset: string; free: string }>;
+    };
+
+    noteMcpUse("account", { via: "mcp", tool: "spot_getAccount" });
+
+    return {
+      uid: account.uid,
+      accountType: account.accountType,
+      canTrade: account.canTrade,
+      balances: Object.fromEntries((account.balances ?? []).map((b) => [b.asset, b.free])),
+    };
+  } catch (err) {
+    noteMcpUse("account", { via: "rest", reason: String(err) });
+    console.warn("[exchange] mcp account read failed:", err);
+    return null;
+  }
 }
 
 /**
