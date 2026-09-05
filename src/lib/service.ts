@@ -18,7 +18,7 @@
  * This file is the single source of truth. The manifest route and the 402
  * preview both read it, so they can never drift apart.
  */
-import type { Intel } from "@/lib/types";
+import type { Intel, Signal } from "@/lib/types";
 
 export const SERVICE_NAME = "Omon Intel";
 
@@ -63,6 +63,33 @@ export function previewOf(intel: Intel): Record<string, unknown> {
   };
 }
 
+/**
+ * The unpaid preview of a signal.
+ *
+ * Withholds exactly the two fields that ARE the product — `side` and `sizeUsd`,
+ * the actionable instruction — while showing enough for a buyer to judge
+ * quality: which market, how strongly the news and the chart agreed, and when
+ * it was formed. Same bargain as previewOf() above.
+ *
+ * Returns null on a cold cache rather than inventing a row. A fabricated trade
+ * is a different thing from a fabricated summary, and must never appear in a
+ * 402 challenge dressed as real.
+ */
+export function previewOfSignal(signal: Signal | null): Record<string, unknown> | null {
+  if (!signal) return null;
+  return {
+    id: signal.id,
+    intelId: signal.intelId,
+    symbol: signal.symbol,
+    side: "[paid] BUY | SELL",
+    sizeUsd: "[paid] number",
+    thesis: "[paid] one sentence tying the trade to the headline",
+    convictionLabel: signal.convictionLabel ?? null,
+    convictionScore: signal.convictionScore ?? null,
+    createdAt: signal.createdAt,
+  };
+}
+
 export type EndpointDoc = {
   path: string;
   method: "GET";
@@ -104,10 +131,18 @@ export const ENDPOINTS: EndpointDoc[] = [
   {
     path: "/api/signals",
     method: "GET",
-    status: "planned",
+    status: "live",
     description:
-      "Trade signals derived from the same intelligence plus live Binance prices.",
+      "Trade signals derived from the same intelligence plus live Binance market data, each carrying a conviction score for how far the news and the chart agreed. Served from a cache; each response says how old it is.",
+    query: {
+      limit: "1-10, default 3 — how many signals to return",
+    },
+    // Named per rail rather than per vendor: reads try Binance MCP first and
+    // fall through to the Skill Hub CLI, and /api/agent-os reports which one
+    // actually served. Provenance is part of what a buyer is purchasing.
     poweredBy: [
+      "binance-skillhub:spot klines",
+      "binance-skillhub:spot ticker-price",
       "binance-mcp:spot_klines",
       "binance-mcp:spot_tickerPrice",
       "llm:gemini",
@@ -120,8 +155,14 @@ export const ENDPOINTS: EndpointDoc[] = [
           sizeUsd: "number",
           thesis: "string — one sentence tying the trade to the headline",
           intelId: "string — the intel row this came from",
+          convictionScore: "number | null — -1..1, how far news and chart agreed",
+          convictionLabel: '"high" | "medium" | "low" | null',
         },
       ],
+      fresh: "boolean — false once the cache is past its TTL",
+      ageSeconds: "number | null — age of the cached signals",
+      source: '"cache" | "empty"',
+      servedAt: "string — ISO 8601",
     },
   },
 ];
@@ -214,6 +255,7 @@ export function serviceManifest(args: {
       { path: "/.well-known/x402", description: "This document." },
       { path: "/api/manifest", description: "This document, canonical path." },
       { path: "/api/intel/refresh", description: "Cache status (GET)." },
+      { path: "/api/signals/refresh", description: "Signal cache status (GET)." },
     ],
   };
 }

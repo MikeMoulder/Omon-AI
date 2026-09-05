@@ -4,9 +4,12 @@
 
 ## VPS deployment status (2026-09-05, evening)
 
-**The app is live on the public origin. START HERE steps 1 and 2 are done. Step
-3 — the MCP token — is the only thing still blocking, and it needs a human with
-a browser.**
+**The app is live on the public origin and the product is now built — console,
+tick and ledger included. The MCP token is still unobtainable (Binance
+allowlists clients; see the BLOCKER section) and nothing depends on it.**
+
+**Two things need a human, in this order: `pm2 restart omon --update-env` so the
+origin serves the console that is already on disk, and then the video.**
 
 | | |
 |---|---|
@@ -20,6 +23,8 @@ a browser.**
 | Exchange | **live** — `binance spot @ demo-api.binance.com`; balances read: 4994 USDT / 5000 USDC / 0.008 BNB |
 | LLM | **live** — Gemini structured output, 5.1s |
 | Full pipeline | **green live** — `news-smoke --live` PASS, `strategy-smoke --live` PASS (incl. the BLOCKED beat) |
+| Console | **BUILT** — `/` is the product screen, fed by `/api/stream`. `console-smoke --tick` PASS. **The running pm2 process still serves the OLD page — restart it** |
+| Tick | **BUILT** — `POST /api/cron/tick`, 9.2s, live fill + live refusal |
 | MCP | **still OFF.** `mcp-smoke.ts` reports "no MCP token". Nothing has changed about the central caveat below |
 
 `pm2 save` has been run and `pm2-root` is enabled, so the process comes back
@@ -291,6 +296,75 @@ on its PATH — if `cliMode()` ever reports "not found" on the server, check the
 pm2 environment before anything else, and `pm2 restart omon --update-env`.
 `BINANCE_CLI_PATH` overrides the lookup if it ever needs pinning.
 
+### THE CONSOLE, THE TICK AND THE LEDGER — BUILT 2026-09-05, late
+
+**Section 7 items A and B are done, and C was already done. Only the video is
+left.** `src/app/page.tsx` is the product screen; the create-next-app template
+is gone.
+
+```text
+src/lib/ledger.ts            Purchases (money in) and actions (money out), in
+                             memory. The budget's source of truth — spentToday()
+                             derives from these rows. Do not add a balance field.
+src/lib/payment-log.ts       Turns a settled 402 into a purchase row.
+src/lib/console-state.ts     One snapshot of everything the screen shows.
+src/app/api/stream/route.ts  SSE. One full snapshot every 2s (CONSOLE_STREAM_MS).
+src/app/api/cron/tick/route  The tick. POST = one beat, GET = the last one.
+src/app/page.tsx             The console.
+scripts/console-smoke.ts     Proves all of it. --tick drives a live beat.
+```
+
+**Proven end to end on 2026-09-05, on a build of this tree:**
+
+```text
+POST /api/cron/tick        9.2s. news -> intel -> signal -> ALLOW -> FILLED,
+                           order 62321952811, 0.00006 BTC for 4.79 USDT.
+POST ?sizeUsd=99           BLOCK, "$99.00 exceeds the $25 per-trade cap",
+                           order null, spentToday unchanged at $5.
+node scripts/pay.mjs       settled 2.68s, tx 0x8baed29e3eade775…, and the
+                           purchase appeared in the stream's money.in with the
+                           payer address and that hash.
+console-smoke --tick       PASS, 17 checks.
+budget-test                16/16, unchanged.
+reads                      prices and candles both `via: cli` — Agent OS.
+```
+
+**Three things worth knowing before changing any of it.**
+
+1. **`withPaymentLog` wraps the OUTSIDE of `withX402`, and the order is not
+   cosmetic.** `withX402` settles *after* the handler returns and writes the
+   result onto the response as a **`PAYMENT-RESPONSE`** header — not the v1
+   `X-PAYMENT-RESPONSE`, which is what the client-side decoder uses and what you
+   will grep for first. Neither the handler nor the `preview` callback can see
+   the transaction, so the only place the settled fact exists is on the way out.
+   Wrapping the other way round records nothing and fails silently.
+
+2. **The console's status row uses `mcpMode()`/`cliMode()`, never
+   `mcpHealth()`/`cliHealth()`.** The health calls spawn `binance-cli` and open
+   a JSON-RPC connection; at one snapshot every two seconds that is a process
+   spawn every two seconds for as long as the page is open. `/api/agent-os` is
+   still the deep check and the two agree, because they read the same functions
+   underneath. Balances are the only real network read in a snapshot, behind a
+   15s cache (`CONSOLE_BALANCE_TTL_MS`).
+
+3. **`/api/cron/tick?sizeUsd=` is an open, unauthenticated size override, and
+   that is deliberate.** It is the BLOCKED beat's trigger and a live proof of
+   the budget layer's central claim: the parameter is read as untrusted input
+   exactly like model output, so no value of it moves more money than
+   `BUDGET_MAX_TRADE_USD` allows. Say that out loud in the video rather than
+   hiding the button. If it ever stops being true, the demo is the least of it.
+
+**What the money row actually says, and why it is not one number.** Revenue is
+USDC on Base Sepolia; trading is demo USDT on Binance. They are different rails
+with no settlement between them, so the console shows them side by side and
+never nets them into a "profit". `earnedTodayUsd` and `spentTodayUsd` are
+separate on purpose — do not add a combined figure.
+
+**The ledger is in memory, like both caches.** A restart resets the rolling 24h
+budget window and empties the money panels. That is fine on a long-lived pm2
+process and worth knowing before a recording: restart, then run a tick and a
+`pay.mjs` so the screen is not empty when the camera rolls.
+
 ### VPN (Windscribe) — unauthenticated, and NOT on the critical path
 
 Windscribe CLI 2.24.12 is installed, the helper service is active, and the
@@ -318,24 +392,53 @@ and the scripts are all `npx tsx`, so nothing needs porting.
 hours). Then section 7 for what to build.**
 
 ```text
-Do first, in order. Each blocks the next.
-  1. DONE (2026-09-05) — repo is current, src/lib/mcp.ts is present.
-  2. DONE (2026-09-05) — live at https://www.omon-ai.duckdns.org over HTTPS;
-     /.well-known/oauth-client returns JSON when fetched from outside.
-  3. NEXT, AND BLOCKING — get the MCP token onto the box (section 12.3).
-     Needs a human with a browser. Verify with mcp-smoke.ts.
-  4. THEN build: the tick's trade half, then the console. Section 7.
+Setup is DONE. Do not redo any of it.
+  1. DONE — repo current, deps installed under node 22, build green.
+  2. DONE — live at https://www.omon-ai.duckdns.org (pm2 `omon`, Caddy).
+  3. DONE — .env.local complete; exchange, LLM and Skill Hub all live.
+  4. DONE — Skill Hub rail serving prices and candles through Agent OS.
+
+  5. DONE — the console, the tick and the ledger. See "THE CONSOLE" below.
+
+Build next. Only one thing is left, and it is the mandatory one.
+  A. DONE — the console. src/app/page.tsx is the product screen.
+  B. DONE — the tick. POST /api/cron/tick, proven end to end with a live fill.
+  C. DONE — /api/signals is built and paid.
+  D. The 2:15 video. MANDATORY, not started. Section 8. Film the console.
 ```
 
-**The single most important fact:** the Agent OS integration is written and its
-failure path is tested, but **no real MCP token has ever been minted**. Until
-`npx tsx scripts/mcp-smoke.ts` passes on this box, every MCP read is silently
-falling back to REST. It will not crash and it will not look broken — that is
-exactly why you must check rather than assume. See section 12.
+**ONE THING NEEDS A HUMAN FIRST: `pm2 restart omon --update-env`.** The console
+is built, the build is green and `.next` on disk is the new one — but the live
+pm2 process is still serving the old page from memory, so
+`https://www.omon-ai.duckdns.org/` still shows the create-next-app template
+while the disk does not. Restart it before believing anything about the origin,
+and re-verify with:
 
-**Do not** run `scripts/mcp-auth.ts` over a bare SSH session and expect it to
-work. It waits for a browser redirect on `127.0.0.1:8788` and there is no
-browser on the VPS. Section 12 gives the two ways round that.
+```bash
+export PATH=/root/.nvm/versions/node/v22.23.2/bin:$PATH
+pm2 restart omon --update-env
+npx tsx scripts/console-smoke.ts https://www.omon-ai.duckdns.org
+```
+
+**The single most important fact has CHANGED. Read this before section 11b,
+which was written when the old one was still true.**
+
+**Binance MCP cannot be connected, and no amount of work on this box will fix
+it.** Binance allowlists agent clients at the authorize step and Omon's
+self-published `client_id` is refused with `3346001`. There is no registration
+endpoint. **Do not spend another hour on `scripts/mcp-auth.ts`** — it is correct
+and it works right up to the wall.
+
+**That is already solved, and the product does not depend on it.** The Binance
+Skill Hub CLI (`binance-cli`) is a second Agent OS surface with no OAuth and no
+allowlist, it is installed and serving, and the candles the strategy runs on come
+through it. "Built with Binance Agent OS" is true in the product today. See "THE
+WAY ROUND IT" near the top of this file.
+
+**What is actually at risk is the submission, not the integration.** With the
+deadline on 2026-09-08 the console now exists and the video does not. The video
+is the one mandatory Track A artifact and it is the only thing between this
+project and a submission. Film the screen.
 
 ---
 
@@ -367,15 +470,22 @@ Every technical finding, with evidence: `assets/spike-notes.md`.
 ## 2. State of play
 
 **Every risky piece is proven. Nothing unknown is left.** What remains is wiring
-code and a screen.
+code and a screen — plus the video, which is mandatory and not started.
+
+*Rows below marked with a date in bold were re-verified on the VPS on 2026-09-05
+evening. Two entries in the original table were optimistic and have been
+corrected in place: MCP is not merely unproven, it is refused; and the "tools
+verified" row describes Claude Code's connection, not Omon's.*
 
 | Piece | Status | Evidence |
 |---|---|---|
 | Paid endpoint (x402) | working | tx `0x2c0b06de25ebed4c4fb32863779dd26c56d9c787d1478a66cfd21f84902a9859` on Base Sepolia, settled, 1.26s round trip |
-| Binance MCP — in the product | **code done, UNPROVEN LIVE** | `src/lib/mcp.ts`; reads routed in `exchange.ts`. Failure path tested (bogus token → clean fallback + recorded reason). **No token minted yet — section 12** |
-| Binance MCP — tools verified | verified | `spot_klines`, `spot_tickerPrice`, `spot_getAccount` all called live during the 2026-09-05 review. UID 1273695308 |
-| Intel + Signal agents | live | Gemini free tier, real structured output |
-| Exchange prices | live | `demo-api.binance.com` |
+| Binance MCP — in the product | **BLOCKED, not just unproven** | `src/lib/mcp.ts` is complete and its failure path is tested, but Binance allowlists clients: Omon's `client_id` is refused with `3346001` and there is no registration endpoint. Reads fall through to the Skill Hub rail |
+| Binance MCP — tools verified | verified, but **not by Omon** | `spot_klines`, `spot_tickerPrice`, `spot_getAccount` were called through *Claude Code's* allowlisted MCP client (`.mcp.json`), never through Omon's. UID 1273695308. Not evidence Omon can connect |
+| Intel + Signal agents | **live (2026-09-05)** | Gemini structured output, 5.1s; `llm-smoke.ts` |
+| Exchange prices | **live (2026-09-05)** | Skill Hub rail first, `demo-api.binance.com` as the floor |
+| Exchange account | **live (2026-09-05)** | balances read: 4994 USDT / 5000 USDC / 0.008 BNB |
+| /api/signals | **BUILT 2026-09-05** | real 402 with a preview; `signal-cache.ts` + `/api/signals/refresh`. Every path the manifest advertises now answers |
 | Spot order | **FILLED** | order `6947725227`, 0.008 BNB for 5.77 USDT |
 | Futures order | FILLED | order `2635918071` — proven, then **cut from scope** |
 | Budget layer | 16 tests green | `npx tsx scripts/budget-test.ts` |
@@ -385,9 +495,9 @@ code and a screen.
 | Technical layer (EMA/ATR/breakout) | **working** | `npx tsx scripts/indicators-test.ts <ren-ai path>` — port matches the original on 19,980 bars |
 | Signal = news + chart conviction | **working** | `npx tsx scripts/strategy-smoke.ts --live` |
 | Agent OS discoverability | **working** | `agentOs` block in `/.well-known/x402`, `poweredBy` per endpoint, `GET /api/agent-os` |
-| Cron tick (wiring + order half) | **NOT BUILT — next** | — |
-| Console + SSE | NOT BUILT | `page.tsx` is still the Next.js template. `/api/agent-os` is the status row's data source, waiting |
-| Persistence | NOT BUILT | no database yet — but a long-lived VPS process keeps the in-memory cache warm, which was the actual demo risk |
+| Cron tick (wiring + order half) | **BUILT 2026-09-05** | `POST /api/cron/tick` — 9.2s beat, live fill (order 62321952811) and the $99 refusal, both recorded |
+| Console + SSE | **BUILT 2026-09-05** | `page.tsx` is the product screen; `/api/stream` pushes a full snapshot every 2s. `scripts/console-smoke.ts --tick` PASSes 17 checks. **Needs `pm2 restart omon` to reach the public origin** |
+| Persistence | NOT BUILT | no database yet — the ledger and both caches are in memory, and a long-lived VPS process keeps them warm, which was the actual demo risk |
 | Skill Hub CLI rail | **LIVE — serving** | `binance-cli 2.1.1`; `skillhub-smoke.ts` passes, candles + prices both `via: "cli"` |
 | Deployed on the VPS | **live** | `https://www.omon-ai.duckdns.org` — pm2 `omon`, Caddy, 21 discovery checks pass against the public origin |
 | README | **written** | rewritten 2026-09-05, Agent OS section included. The create-next-app boilerplate is gone |
@@ -420,6 +530,11 @@ src/lib/indicators.ts  ema/atr/rsi/priorRange. Pure math, ported from ren-ai, by
 src/lib/strategy.ts    trendSignal + technicalSnapshot + conviction. The chart half.
 src/lib/service.ts     What Omon sells, machine-readable. Feeds the manifest AND the 402
                        preview, so the two cannot drift.
+src/lib/ledger.ts      Money in (purchases) and money out (actions), in memory. The budget's
+                       source of truth — spentToday() derives from these rows.
+src/lib/payment-log.ts Turns a settled 402 into a purchase row. Wraps the OUTSIDE of withX402.
+src/lib/console-state.ts  One cheap snapshot of everything the console shows. Built every 2s,
+                       so nothing in it may spawn a process or call a model.
 
 src/app/api/intel/route.ts          The paid endpoint. Serves the cache. WORKS — do not casually refactor.
 src/app/api/intel/refresh/route.ts  Free. GET = cache status, POST = collect news and analyse. The slow path.
@@ -431,7 +546,11 @@ src/app/api/agent-os/route.ts       Free. Seam status: MCP mode, tools resolved,
 src/app/api/oauth-client/route.ts   Our OAuth client metadata document. Aliased to
                                     /.well-known/oauth-client. This URL IS our client_id, and
                                     Binance fetches it server-side — it must stay public.
-src/app/page.tsx             Still the Next.js default page. This is the console's home.
+src/app/api/cron/tick/route.ts      The tick. POST runs one beat end to end; GET reports the
+                                    last one. NEVER call it inside a user-facing request.
+src/app/api/stream/route.ts         SSE. One full ConsoleSnapshot every 2s. The console's feed.
+src/app/page.tsx             The console. Intel and signals left, money in and money out right,
+                             the budget layer drawn across the middle.
 
 scripts/pay.mjs              Outside buyer. Pays a 402 for real.
 scripts/llm-smoke.ts         Exercises both agents.
@@ -445,6 +564,8 @@ scripts/mcp-auth.ts          One-time OAuth mint. Writes .mcp-token.json. Needs 
                              and a browser — section 12.
 scripts/mcp-smoke.ts         Proves the Agent OS integration. FAILS if data came over the REST
                              fallback instead of MCP. Run this on the VPS before believing it.
+scripts/console-smoke.ts     The console and the tick. --tick drives a live beat and asserts the
+                             oversized one is REFUSED. Needs a running server.
 ```
 
 **Seam discipline:** `src/lib/*.ts` are the only files that talk to the outside
@@ -682,11 +803,27 @@ measured on — same rules, a clock a 2:15 demo can actually reach.
 
 ## 7. What to build next, in order
 
-**1. The tick — `POST /api/cron/tick`.** The spine, and its **first half now
-exists**: `POST /api/intel/refresh` already does RSS → `intelFromHeadline` → cache,
-end to end, live. What is left is the trade half — take the newest cached intel →
-`getPrices` → `signalFromIntel` → `evaluateTrade` → `placeOrder` if ALLOW. Either
-extend the refresh route or add `/api/cron/tick` that calls `refreshIntel()` first.
+> **REORDERED 2026-09-05 evening, then CLOSED OUT 2026-09-05 late.** Everything
+> in this list is built except the video. The reasoning is kept because it
+> explains why the pieces look the way they do; the statuses below are current.
+> The one item left is the mandatory one, and it is not a coding task.
+>
+> ```text
+> A. The console          DONE 2026-09-05, late.
+> B. The tick's trade half   DONE 2026-09-05, late. POST /api/cron/tick.
+> C. /api/signals            DONE 2026-09-05.
+> D. The 2:15 video          <- START HERE. MANDATORY, and now the only thing
+>                            standing between this project and a submission.
+> E. The BLOCKED beat        DONE. /api/cron/tick?sizeUsd=99, and the console
+>                            renders the refusal next to the fills.
+> F. Persistence             was 2. Still optional, still not built.
+> ```
+
+**1. ~~The tick~~ — `POST /api/cron/tick`. DONE 2026-09-05.** The spine, whole:
+`refreshIntel()` → `refreshSignals()` → `evaluateTrade()` → `placeOrder()` on
+ALLOW, and `recordAction()` either way. Proven with a live fill and a live
+refusal — see "THE CONSOLE, THE TICK AND THE LEDGER" near the top of this file.
+Nothing schedules it yet: it is driven by the console's buttons and by hand.
 **Never run this inside a user-facing request** — two LLM calls plus an order is
 15-40s. Call it on a **5 minute** interval to match the cache TTL; the quota guard
 (`INTEL_MAX_NEW=3`) is what keeps that inside the Gemini free tier.
@@ -699,23 +836,45 @@ from `actions` + `purchases` — `spentToday()` already does this. Do not add a
 balance column. Postgres/Neon + Drizzle was the plan; anything durable works, and
 if time is short, a single JSON file beats missing the deadline.
 
-**3. The console — `src/app/page.tsx` + `/api/stream`.** One screen. Intel feed
-on the left; money in (payments) and money out (orders) on the right, balance
-large and animated. **The moment a payment lands must be impossible to miss** —
-that is the aha. Show `llmMode()` and `exchangeMode()` somewhere honest.
+**3. ~~The console~~ — `src/app/page.tsx` + `/api/stream`. DONE 2026-09-05.**
+One screen, built as specified: intel and signals left, money in and money out
+right, the budget layer drawn across the middle, and every seam's mode in the
+status row. A new purchase row flashes green and the revenue figure is the
+largest thing on the page — the payment moment is the one that had to be
+impossible to miss.
 
-**4. `/api/signals`** as a second paid endpoint. Copy `/api/intel`.
+**4. ~~`/api/signals`~~ DONE 2026-09-05.** Built as a second paid endpoint with
+`src/lib/signal-cache.ts` mirroring `intel-cache.ts`, plus a free
+`/api/signals/refresh` that the tick will drive. Every path the manifest
+advertises now answers; nothing in the published catalogue 404s.
 
-**5. The BLOCKED beat.** Trigger a trade above `BUDGET_MAX_TRADE_USD` ($25) and
-show the refusal with its reason. The layer already does this and is tested.
+Three things learned building it, all of which apply to anything else paid:
 
-**6. ~~Deploy to Vercel~~ → Run on the VPS. SUPERSEDED — this is now step 0, not
-step 6.** Omon runs as a long-lived process on a VPS, not on Vercel. That is not
-a swap of hosts, it changes three things: the serverless function timeout stops
-constraining the tick, the in-process intel cache survives (so the 402 preview
-stops serving `example.com` fixture rows on a cold start), and the MCP token can
-be renewed in place. **It also gates the MCP token mint**, which cannot happen
-without a public origin. Section 12 is the runbook.
+- **`withX402` answers an unpaid request from `unpaidResponseBody()` and NEVER
+  calls the handler.** Revalidation placed in the handler therefore only ever
+  runs for buyers who already paid, which left the 402 preview permanently null
+  — the first agent to discover Omon would see an empty shop window. The
+  `preview` callback is the code path unpaid traffic actually reaches, so the
+  cache is warmed from there. `/api/intel` hides this because its preview falls
+  back to a fixture.
+- **Never build a signal from the fixture intel row.** `getIntel()` falls back
+  to a recorded headline on a cold cache, which is right for a summary and wrong
+  for a trade: a signal derived from a fixture is a fabricated instruction to
+  move money, in a PAID response. A forced refresh reaches that state after
+  every restart, so the guard lives in `doRefresh()` and returns
+  `lastError: "intel cache is cold"` rather than inventing a trade. Verified
+  both ways on the live origin.
+- **The signal cache has no fixture fallback at all**, unlike the intel cache. A
+  cold read returns `source: "empty"` and an empty array. That asymmetry is
+  deliberate — do not "fix" it for symmetry.
+
+**5. ~~The BLOCKED beat~~ DONE.** `POST /api/cron/tick?sizeUsd=99` — the console
+has a button for it. BLOCK with "$99.00 exceeds the $25 per-trade cap", no order,
+`spentToday` unchanged, and the refusal rendered in red beside the fills.
+
+**6. ~~Deploy to Vercel~~ → Run on the VPS. DONE 2026-09-05 — see the deployment
+status at the top of this file.** Kept for the reasoning, which still explains
+why several later decisions look the way they do.
 
 **7. The 2:15 video.** See section 8. The README is done.
 

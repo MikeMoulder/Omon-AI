@@ -13,6 +13,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { withX402 } from "@x402/next";
 import { getIntel, getLatestIntel, revalidateIntel } from "@/lib/intel-cache";
 import { previewOf } from "@/lib/service";
+import { withPaymentLog } from "@/lib/payment-log";
 import { paidRoute, paymentServer } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
@@ -36,15 +37,20 @@ async function handler(request: NextRequest) {
 
 const server = await paymentServer();
 
-export const GET = withX402(
-  handler,
-  {
-    "/api/intel": paidRoute(
-      "Structured, actionable crypto market intelligence derived from live news headlines",
-      // An unpaid request gets a real row with the two paid fields withheld, so
-      // an agent can judge the product before spending anything on it.
-      { preview: () => previewOf(getLatestIntel()) },
-    ),
-  },
-  server,
+// withPaymentLog wraps the OUTSIDE, because withX402 settles after the handler
+// returns and writes the transaction onto the response header. See payment-log.ts.
+export const GET = withPaymentLog(
+  "/api/intel",
+  withX402(
+    handler,
+    {
+      "/api/intel": paidRoute(
+        "Structured, actionable crypto market intelligence derived from live news headlines",
+        // An unpaid request gets a real row with the two paid fields withheld, so
+        // an agent can judge the product before spending anything on it.
+        { preview: () => previewOf(getLatestIntel()) },
+      ),
+    },
+    server,
+  ),
 );

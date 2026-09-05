@@ -31,14 +31,22 @@ export const network = (
 // Stored WITHOUT the "$" — Next expands `$0` in .env files to an empty string.
 export const price = `$${process.env.X402_PRICE ?? "0.01"}`;
 
+/** The same figure as a number, for the ledger. `price` is display, this is arithmetic. */
+export const priceUsd = Number(process.env.X402_PRICE ?? "0.01");
+
+/**
+ * What a buyer actually pays in. Display only — the 402 challenge names the
+ * asset itself, and nothing downstream converts using this string.
+ */
+export const priceToken = process.env.X402_TOKEN_SYMBOL ?? "USDC";
+
 let serverPromise: Promise<x402ResourceServer> | null = null;
 
 async function build(): Promise<x402ResourceServer> {
   if (rail === "b402") {
     // Imported lazily so a missing RSA credential cannot break the testnet rail.
-    const { B402Client, B402ExactServerScheme, B402FacilitatorClient } = await import(
-      "@bnb-chain/b402/server"
-    );
+    const { B402Client, B402ExactServerScheme, B402FacilitatorClient } =
+      await import("@bnb-chain/b402/server");
     const transport = B402Client.fromEnv();
     if (!transport) {
       throw new Error(
