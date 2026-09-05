@@ -7,6 +7,38 @@ hours of real build time for one person.
 
 ---
 
+## START HERE if you are the agent on the VPS
+
+You are picking this up on a Linux box. The project was built on Windows, so a
+few things below assume PowerShell paths — the TypeScript is platform-agnostic
+and the scripts are all `npx tsx`, so nothing needs porting.
+
+**Read, in this order: this block → section 12 (the VPS runbook) → section 11b
+(what the Agent OS work actually does) → section 6 (traps that already cost
+hours). Then section 7 for what to build.**
+
+```text
+Do first, in order. Each blocks the next.
+  1. Confirm the repo you cloned is current. If src/lib/mcp.ts is missing, the
+     push never happened and you are looking at stale code — STOP and say so.
+  2. Serve the app on the public domain over HTTPS. /.well-known/oauth-client
+     MUST be reachable from the outside or the MCP token cannot be minted.
+  3. Get the MCP token onto the box (section 12). Verify with mcp-smoke.ts.
+  4. THEN build: the tick's trade half, then the console. Section 7.
+```
+
+**The single most important fact:** the Agent OS integration is written and its
+failure path is tested, but **no real MCP token has ever been minted**. Until
+`npx tsx scripts/mcp-smoke.ts` passes on this box, every MCP read is silently
+falling back to REST. It will not crash and it will not look broken — that is
+exactly why you must check rather than assume. See section 12.
+
+**Do not** run `scripts/mcp-auth.ts` over a bare SSH session and expect it to
+work. It waits for a browser redirect on `127.0.0.1:8788` and there is no
+browser on the VPS. Section 12 gives the two ways round that.
+
+---
+
 ## 1. What this is
 
 Omon is one system with two agents inside it, built for the **Binance Agent OS
@@ -40,7 +72,8 @@ code and a screen.
 | Piece | Status | Evidence |
 |---|---|---|
 | Paid endpoint (x402) | working | tx `0x2c0b06de25ebed4c4fb32863779dd26c56d9c787d1478a66cfd21f84902a9859` on Base Sepolia, settled, 1.26s round trip |
-| Binance MCP | connected | OAuth'd in Claude Code, live prices, UID 1273695308 |
+| Binance MCP — in the product | **code done, UNPROVEN LIVE** | `src/lib/mcp.ts`; reads routed in `exchange.ts`. Failure path tested (bogus token → clean fallback + recorded reason). **No token minted yet — section 12** |
+| Binance MCP — tools verified | verified | `spot_klines`, `spot_tickerPrice`, `spot_getAccount` all called live during the 2026-09-05 review. UID 1273695308 |
 | Intel + Signal agents | live | Gemini free tier, real structured output |
 | Exchange prices | live | `demo-api.binance.com` |
 | Spot order | **FILLED** | order `6947725227`, 0.008 BNB for 5.77 USDT |
@@ -51,10 +84,12 @@ code and a screen.
 | Discovery without a directory | **working** | `npx tsx scripts/discovery-smoke.ts` — 21 checks |
 | Technical layer (EMA/ATR/breakout) | **working** | `npx tsx scripts/indicators-test.ts <ren-ai path>` — port matches the original on 19,980 bars |
 | Signal = news + chart conviction | **working** | `npx tsx scripts/strategy-smoke.ts --live` |
+| Agent OS discoverability | **working** | `agentOs` block in `/.well-known/x402`, `poweredBy` per endpoint, `GET /api/agent-os` |
 | Cron tick (wiring + order half) | **NOT BUILT — next** | — |
-| Console + SSE | NOT BUILT | — |
-| Persistence | NOT BUILT | no database yet |
-| README + video | NOT BUILT | — |
+| Console + SSE | NOT BUILT | `page.tsx` is still the Next.js template. `/api/agent-os` is the status row's data source, waiting |
+| Persistence | NOT BUILT | no database yet — but a long-lived VPS process keeps the in-memory cache warm, which was the actual demo risk |
+| README | **written** | rewritten 2026-09-05, Agent OS section included. The create-next-app boilerplate is gone |
+| Video | NOT BUILT | the one mandatory Track A artifact |
 
 **Total cost so far: $0.** No real funds anywhere. That is deliberate and it is
 not a compromise — see section 5.
@@ -72,7 +107,12 @@ src/lib/x402.ts        Payment rail. 402 challenge, verify, settle.
 src/lib/llm.ts         Gemini. intelFromHeadline() + signalFromIntel() + llmMode(agent).
                        One key per agent: GEMINI_INTEL_API_KEY / GEMINI_SIGNAL_API_KEY,
                        both falling back to GEMINI_API_KEY.
-src/lib/exchange.ts    Binance. getPrices/getBalances/placeOrder + exchangeMode().
+src/lib/mcp.ts         Binance MCP (Agent OS). JSON-RPC over Streamable HTTP, OAuth token
+                       store with in-place renewal, mcpMode()/mcpCall()/mcpHealth().
+                       READ ONLY BY DESIGN — never add a write path here. Section 11b.
+src/lib/exchange.ts    Binance. getPrices/getCandles route through MCP first and fall back
+                       to REST, recording which. placeOrder() is REST-only, Demo Mode.
+                       getAgentOsAccount() is the MCP read of the REAL account.
 src/lib/budget.ts      The leash. evaluateTrade() + spentToday(). No network, no model.
 src/lib/indicators.ts  ema/atr/rsi/priorRange. Pure math, ported from ren-ai, byte-checked.
 src/lib/strategy.ts    trendSignal + technicalSnapshot + conviction. The chart half.
@@ -82,6 +122,13 @@ src/lib/service.ts     What Omon sells, machine-readable. Feeds the manifest AND
 src/app/api/intel/route.ts          The paid endpoint. Serves the cache. WORKS — do not casually refactor.
 src/app/api/intel/refresh/route.ts  Free. GET = cache status, POST = collect news and analyse. The slow path.
 src/app/api/manifest/route.ts       Free public catalogue. Aliased to /.well-known/x402 by next.config.ts.
+                                    Carries the `agentOs` block with LIVE connection status.
+src/app/api/agent-os/route.ts       Free. Seam status: MCP mode, tools resolved, token health
+                                    (never the token), and which rail each read last used.
+                                    This is the console status row's data source.
+src/app/api/oauth-client/route.ts   Our OAuth client metadata document. Aliased to
+                                    /.well-known/oauth-client. This URL IS our client_id, and
+                                    Binance fetches it server-side — it must stay public.
 src/app/page.tsx             Still the Next.js default page. This is the console's home.
 
 scripts/pay.mjs              Outside buyer. Pays a 402 for real.
@@ -92,6 +139,10 @@ scripts/news-smoke.ts        Feeds -> intel -> cache. Asserts the TTL and the qu
 scripts/discovery-smoke.ts   Walks the path a stranger's agent walks. Needs a running server.
 scripts/indicators-test.ts   Cross-checks the TS port against the original ren-ai JS.
 scripts/strategy-smoke.ts    intel -> candles -> conviction -> signal -> budget, end to end.
+scripts/mcp-auth.ts          One-time OAuth mint. Writes .mcp-token.json. Needs PUBLIC_BASE_URL
+                             and a browser — section 12.
+scripts/mcp-smoke.ts         Proves the Agent OS integration. FAILS if data came over the REST
+                             fallback instead of MCP. Run this on the VPS before believing it.
 ```
 
 **Seam discipline:** `src/lib/*.ts` are the only files that talk to the outside
@@ -121,16 +172,36 @@ npx tsx scripts/indicators-test.ts ../ren-ai      # port vs original; skips if a
 npx tsx scripts/llm-smoke.ts --live                # real Gemini call
 npx tsx scripts/exchange-smoke.ts --live           # prices + balances
 npx tsx scripts/exchange-smoke.ts --live --order   # places a REAL demo order
+
+# Agent OS / MCP
+PUBLIC_BASE_URL=https://your-domain npx tsx scripts/mcp-auth.ts   # one-time, needs a browser
+npx tsx scripts/mcp-smoke.ts                       # fails if MCP silently fell back to REST
+npx tsx scripts/mcp-smoke.ts --verbose             # same, prints the values fetched
+curl localhost:3000/api/agent-os                   # seam status, no credentials needed
+
 npm run dev                                        # then in another shell:
 curl -X POST 'localhost:3000/api/intel/refresh?force=1'   # fill the cache first
 npx tsx scripts/discovery-smoke.ts                        # 21 checks, no payment
+npx tsx scripts/discovery-smoke.ts http://localhost:3111  # takes a base URL as argv[2]
 MSYS_NO_PATHCONV=1 node scripts/pay.mjs /api/intel        # outside agent pays the 402
 ```
 
-**`--live` is required on the smoke scripts** because `.env.local` pins
-`DEMO_MODE=fixture`. Without it they run fixtures and the banner says so.
+**`MSYS_NO_PATHCONV=1` is a Git-Bash-on-Windows workaround.** On the Linux VPS
+drop it — plain `node scripts/pay.mjs /api/intel`.
 
-Credentials in `.env.local` — all present and working: `GEMINI_API_KEY`
+**`--live` is required on the smoke scripts** because the Windows `.env.local`
+pins `DEMO_MODE=fixture`. Without it they run fixtures and the banner says so.
+
+**On the VPS, `DEMO_MODE` should be empty** (section 12), so `--live` becomes a
+no-op there rather than a requirement. Two consequences worth knowing before you
+are confused by them: `DEMO_MODE=fixture` also turns **MCP** off — set
+`MCP_IN_FIXTURE_MODE=1` to exercise the real MCP rail while everything else
+stays on fixtures — and with `DEMO_MODE` empty, `scripts/exchange-smoke.ts
+--order` places a **real Demo Mode order** without asking twice.
+
+**Credentials do not travel with the repo.** `.env.local` is gitignored, so a
+fresh clone on the VPS has none of them; copy from `.env.example` and fill.
+Present and working on the Windows box: `GEMINI_API_KEY`
 (plus empty `GEMINI_INTEL_API_KEY` / `GEMINI_SIGNAL_API_KEY` placeholders — fill
 them from **separate Google Cloud projects** to actually split the quota),
 `BINANCE_API_KEY`, `BINANCE_SECRET_KEY`, `BUYER_PRIVATE_KEY`, `PAY_TO_ADDRESS`.
@@ -162,6 +233,13 @@ Demo Trading, says so openly, and is a legitimate submission.
 ships no Windows binary, would need bundling into a Vercel deploy, and would mean
 spawning a subprocess inside a serverless function. Plain REST hits the same
 endpoints.
+
+> **Still dropped, but two of those three reasons expired.** The VPS is Linux, so
+> the missing Windows binary is irrelevant, and a long-lived process can spawn a
+> subprocess perfectly well. The decision stands anyway for a better reason: MCP
+> is now in the product (section 11b), so `binance-cli` would be a *second* route
+> to the same Agent OS surface and proves nothing the first does not. Do not
+> spend time on it.
 
 **Cut and staying cut:** the Treasury/yield agent (MCP has no Earn scope — the
 rail does not exist), the reputation layer, "agent marketplace" framing, a human
@@ -329,10 +407,15 @@ that is the aha. Show `llmMode()` and `exchangeMode()` somewhere honest.
 **5. The BLOCKED beat.** Trigger a trade above `BUDGET_MAX_TRADE_USD` ($25) and
 show the refusal with its reason. The layer already does this and is tested.
 
-**6. Deploy to Vercel.** Should have happened on day one. Do it before polishing.
-Verify the tick does not exceed the function timeout in production.
+**6. ~~Deploy to Vercel~~ → Run on the VPS. SUPERSEDED — this is now step 0, not
+step 6.** Omon runs as a long-lived process on a VPS, not on Vercel. That is not
+a swap of hosts, it changes three things: the serverless function timeout stops
+constraining the tick, the in-process intel cache survives (so the 402 preview
+stops serving `example.com` fixture rows on a cold start), and the MCP token can
+be renewed in place. **It also gates the MCP token mint**, which cannot happen
+without a public origin. Section 12 is the runbook.
 
-**7. README and the 2:15 video.** See section 8.
+**7. The 2:15 video.** See section 8. The README is done.
 
 **Feature freeze at T-2h.** Record a clean fallback take early.
 
@@ -403,6 +486,12 @@ One new trap found: **on a cold start the 402 preview serves fixture rows** —
 `https://example.com/treasury-stablecoin-delay`. No persistence means every Vercel
 cold start does this on the exact URL a curious judge probes. Warm the cache on
 boot, or ship a JSON file.
+
+> **Largely retired by the VPS.** A long-lived process keeps `intel-cache.ts`
+> warm, so there are no cold starts to serve fixtures from. It still bites on
+> the first request after a deploy or a restart, so **POST
+> `/api/intel/refresh?force=1` once after starting the process** and the judge
+> path is clean. Persistence is still worth having; it is no longer urgent.
 
 ## 9. Open questions
 
@@ -593,8 +682,14 @@ token degrades to REST with an honest on-screen reason instead of a 500, and the
 video gets recorded soon after a token is minted.
 
 **The MCP token is a live credential to the real account.** It is not the Demo
-Mode key. Never commit it, keep it in Vercel env only, and prefer an Agentic
-sub-account with limits if one can be created without funding it.
+Mode key. Never commit it, and prefer an Agentic sub-account with limits if one
+can be created without funding it.
+
+> **SUPERSEDED on storage** — this line said "keep it in Vercel env only". As
+> built, the token lives in `.mcp-token.json` (gitignored, mode 600), because a
+> long-lived VPS process must be able to rewrite its own credential to renew it
+> and an env var cannot be changed from inside the process that reads it. See
+> section 11b.
 
 **MCP may be slower than REST on the tick.** Give it a timeout the way
 `EXCHANGE_TIMEOUT_MS` does and fall back rather than blocking the tick.
@@ -760,3 +855,198 @@ and `mcpUsage()` reports `via: "rest"` with the reason. Nothing fails silently.
 - The console status row (section 11 L4) has no console to live in yet.
   /api/agent-os is the data source waiting for it.
 ```
+
+---
+
+## 12. VPS runbook — the agent picking this up on the server
+
+*Written 2026-09-05. Everything here is the deployment path; section 11b is what
+the code does and why.*
+
+### 0. Confirm you have current code
+
+The Windows working tree had roughly a day of uncommitted work in it. If that was
+never pushed, a clone gives you a project without the indicator port, the
+manifest or any of the Agent OS work — and nothing will fail loudly, you will
+just be reading an older project.
+
+```bash
+ls src/lib/mcp.ts src/lib/strategy.ts src/lib/indicators.ts src/lib/service.ts
+ls src/app/api/manifest/route.ts src/app/api/agent-os/route.ts
+ls scripts/mcp-auth.ts scripts/mcp-smoke.ts
+```
+
+Any of those missing means the push did not happen. **Stop and say so** rather
+than rebuilding them — they exist, they are tested, and reimplementing them from
+this document would waste hours and produce something subtly different.
+
+```bash
+npm install
+npx tsc --noEmit && npx next build     # both were green on 2026-09-05
+npx tsx scripts/budget-test.ts         # 16 assertions, needs no credentials
+```
+
+### 1. Environment
+
+Copy `.env.example` to `.env.local` and fill it. It documents every variable.
+Three that matter on the VPS specifically and are easy to get wrong:
+
+```bash
+PUBLIC_BASE_URL=https://your-domain     # REQUIRED. No trailing slash.
+DEMO_MODE=                              # leave EMPTY. `fixture` turns MCP off too.
+BINANCE_MCP_TOKEN_FILE=.mcp-token.json  # default; must be writable by the process
+```
+
+`DEMO_MODE=fixture` is pinned in the Windows `.env.local` and it disables the LLM,
+the exchange **and** MCP. If you copy that file across, everything runs on
+fixtures and the banners will say so — which is the seam working correctly, not a
+bug. Clear it on the server.
+
+`PUBLIC_BASE_URL` being wrong is the failure that costs the most time, because
+the symptom is an opaque error on Binance's own page with nothing in any local
+log. It must be the exact public origin, and it must be the one actually serving
+`/.well-known/oauth-client`.
+
+### 2. Serve it, and check the two well-known paths from outside
+
+The app must be publicly reachable over HTTPS **before** the token flow starts,
+because Binance fetches the client metadata document server-side during
+authorisation.
+
+```bash
+npm run build && npm run start          # or pm2 / systemd — see 'keeping it up'
+```
+
+From a machine that is not the VPS:
+
+```bash
+curl https://your-domain/.well-known/oauth-client   # must return JSON, not 404
+curl https://your-domain/.well-known/x402           # the service catalogue
+curl https://your-domain/api/agent-os               # seam status
+```
+
+If `oauth-client` 404s, the rewrite in `next.config.ts` did not apply — it maps
+`/.well-known/oauth-client` to `/api/oauth-client`, and a reverse proxy that
+swallows dot-prefixed paths will break it. Nginx does this by default in some
+configs; check before blaming the app.
+
+### 3. Mint the MCP token
+
+**Binance MCP is OAuth-only. There is no headless path to a first token** —
+`grant_types_supported` is `["authorization_code"]` and nothing else, and
+exchange API keys return 401. A human approves once in a browser. After that the
+token works from any server.
+
+The script waits for a redirect on `127.0.0.1:8788`, so it has to run somewhere
+a browser can reach. **Two ways, pick one:**
+
+**A — mint on the laptop, copy the file over (simplest).** The `client_id` only
+has to be *reachable by Binance*; it does not have to be the machine running the
+flow. The loopback redirect is already listed in the published document.
+
+```bash
+# on the laptop, with the VPS already serving
+PUBLIC_BASE_URL=https://your-domain npx tsx scripts/mcp-auth.ts
+scp .mcp-token.json user@vps:/path/to/omon/.mcp-token.json
+ssh user@vps 'chmod 600 /path/to/omon/.mcp-token.json'
+```
+
+**B — mint on the VPS through an SSH tunnel.** Forward the loopback port so the
+laptop's browser can complete the redirect against the VPS process.
+
+```bash
+ssh -L 8788:localhost:8788 user@vps
+# then, in that session:
+PUBLIC_BASE_URL=https://your-domain npx tsx scripts/mcp-auth.ts
+# open the printed URL in the LAPTOP browser
+```
+
+The script refuses to start on a loopback or missing `PUBLIC_BASE_URL`, and it
+checks that the published document actually lists the redirect URI, so a
+misconfiguration fails in the terminal before a browser opens.
+
+**Read the two lines it prints on success.** They are the answer to a question
+this project has not been able to measure:
+
+```text
+expires_in:    <-- how long before the agent silently drops back to REST
+refresh_token: <-- ISSUED means it renews itself; NOT issued means you repeat
+                   this browser step every time it expires
+```
+
+If no refresh token is issued, work out the expiry cadence and re-mint shortly
+before recording the video. The server does not advertise a refresh grant, so
+assume the worst until you see otherwise.
+
+### 4. Prove it, do not assume it
+
+```bash
+npx tsx scripts/mcp-smoke.ts
+```
+
+This is the whole point of the file. It opens a real MCP session, resolves the
+three tools the product depends on, pulls prices, candles and account state, and
+**fails if any of it arrived over the REST fallback.** A passing run is the
+evidence that "built with Agent OS" is true on this box.
+
+`--verbose` prints the values if you want to eyeball them.
+
+Then confirm the public surfaces agree:
+
+```bash
+curl https://your-domain/api/agent-os | jq .agentOs.mcp
+# mode should be "live", toolsResolved should name all three tools
+curl https://your-domain/.well-known/x402 | jq .agentOs.surfaces[0].status
+# "connected"
+```
+
+If `mode` is `off`, read `reason` — it is written to be self-explanatory and
+names the fix.
+
+### 5. Keeping it up
+
+Use whatever process manager is already on the box; nothing here is fussy. Two
+requirements:
+
+- **The working directory must be the project root**, because the token file
+  path is relative by default. Set an absolute `BINANCE_MCP_TOKEN_FILE` if your
+  supervisor starts the process elsewhere.
+- **The process must be able to write that file**, or in-place token renewal
+  cannot work and you are back to manual re-minting.
+
+Do not run more than one instance against the same token file. Two processes
+refreshing the same credential can race and invalidate each other's token.
+
+### 6. What NOT to do on this box
+
+```text
+Do not place orders through MCP. The MCP token authorises the operator's REAL
+  Binance account (canTrade: true). Orders go to Spot Demo Mode via REST, and
+  src/lib/mcp.ts deliberately has no write path. Do not add one.
+Do not commit .mcp-token.json. It is gitignored; the process rewrites it.
+Do not set X402_RAIL=b402. Without b402 credentials the paid route 500s, and on
+  a server the only symptom is a 500 in the middle of a demo. Section 6.
+Do not cron the tick every minute. Two Gemini calls per tick against a ~1,000
+  request/day free quota locks the account out. 5-15 minutes. Section 6.
+Do not "fix" the fixture fallbacks. They are the reason a dead token degrades
+  instead of breaking. Every one of them records its reason.
+```
+
+### 7. Then build, in this order
+
+Once MCP is proven live, the Agent OS work is finished and the remaining gap is
+the product itself. Section 7 has the detail; the short version:
+
+```text
+1. The tick's trade half — newest cached intel -> getPrices -> signalFromIntel
+   -> evaluateTrade -> placeOrder if ALLOW. The VPS removes the serverless
+   timeout that shaped the original design, so this can be a real interval.
+2. The console — src/app/page.tsx is still the Next.js template. This is the
+   product and there is no video without it. /api/agent-os feeds the status row.
+3. The 2:15 video. Section 8 has the script and the disclosure table that must
+   be said out loud.
+```
+
+The judge scorecard (`assets/judge-scorecard.md`) is the honest read on what
+wins and loses this. Its biggest finding — "Agent OS is not in the product" — is
+what sections 11/11b addressed. Its remaining P0s are the console and the video.
