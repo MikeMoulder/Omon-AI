@@ -5,6 +5,16 @@
 
 export type Direction = "bullish" | "bearish" | "neutral";
 
+/** One OHLCV bar. Field names match the ren-ai engine so ported math is comparable. */
+export type Candle = {
+  t: number; // open time, ms
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+};
+
 /** One story as it came off a feed, before any model has looked at it. */
 export type Headline = {
   title: string;
@@ -33,6 +43,17 @@ export type Signal = {
   sizeUsd: number;
   thesis: string;
   createdAt: string; // ISO
+  /**
+   * How much the news and the chart agreed, -1..1. Optional because a signal can
+   * be produced from news alone when there is no candle history; the console
+   * must show the difference rather than imply a chart was consulted.
+   */
+  convictionScore?: number;
+  convictionLabel?: "high" | "medium" | "low";
+  /** True when news direction and technical regime pointed the same way. */
+  aligned?: boolean;
+  /** The lines behind the score, for the console and the thesis. */
+  convictionReasons?: string[];
 };
 
 export type Decision = {

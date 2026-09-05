@@ -11,7 +11,8 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { withX402 } from "@x402/next";
-import { getIntel, revalidateIntel } from "@/lib/intel-cache";
+import { getIntel, getLatestIntel, revalidateIntel } from "@/lib/intel-cache";
+import { previewOf } from "@/lib/service";
 import { paidRoute, paymentServer } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,13 @@ const server = await paymentServer();
 
 export const GET = withX402(
   handler,
-  { "/api/intel": paidRoute("Structured, actionable crypto market intelligence") },
+  {
+    "/api/intel": paidRoute(
+      "Structured, actionable crypto market intelligence derived from live news headlines",
+      // An unpaid request gets a real row with the two paid fields withheld, so
+      // an agent can judge the product before spending anything on it.
+      { preview: () => previewOf(getLatestIntel()) },
+    ),
+  },
   server,
 );

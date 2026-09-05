@@ -10,7 +10,7 @@
  * newer surface; this file is the write path.
  */
 import crypto from "node:crypto";
-import type { OrderResult } from "@/lib/types";
+import type { OrderResult, Candle } from "@/lib/types";
 
 // Binance SPOT Demo Mode, not Spot Testnet. Both are free and fund-free, but
 // Demo Mode mirrors the live exchange — same features, same exchange filters,
@@ -33,6 +33,14 @@ const TIMEOUT_MS = Number(process.env.EXCHANGE_TIMEOUT_MS ?? 10_000);
 
 /** Exchange-wide floor. An order under this is rejected by the NOTIONAL filter. */
 export const MIN_NOTIONAL_USD = 5;
+
+/**
+ * Candle interval the strategy reads. Hourly by default rather than the 4H the
+ * ren-ai log was measured on: 200 bars of 4H is 33 days of history and its
+ * breakouts fire about once a week, which is too rare to show in a 2:15 demo.
+ * 1h keeps the same rules on a clock the demo can actually reach.
+ */
+export const CANDLE_INTERVAL = process.env.CANDLE_INTERVAL ?? "1h";
 
 export class ExchangeError extends Error {
   constructor(message: string, readonly code?: number) {
@@ -120,6 +128,65 @@ export async function getPrices(symbols: string[]): Promise<Record<string, strin
   )) as Array<{ symbol: string; price: string }>;
 
   return Object.fromEntries(rows.map((row) => [row.symbol, row.price]));
+}
+
+/** Why the last candle fetch failed, per symbol. Read by the console. */
+const lastCandleErrors: Record<string, string> = {};
+
+export function candleErrors(): Record<string, string> {
+  return { ...lastCandleErrors };
+}
+
+/**
+ * OHLCV candles for one symbol. Public endpoint — no key, no signature.
+ *
+ * `limit` must cover the slowest indicator: the strategy needs emaSlow (200)
+ * bars plus one, so anything under ~250 silently produces no snapshot at all.
+ * Binance caps this at 1000, which is the default here for that reason.
+ *
+ * The last candle from this endpoint is the CURRENTLY OPEN one — its close
+ * moves until the interval ends. Indicators must run on closed candles or the
+ * same call gives a different answer every minute, so it is dropped.
+ */
+export async function getCandles(args: {
+  symbol: string;
+  interval?: string;
+  limit?: number;
+}): Promise<Candle[]> {
+  const interval = args.interval ?? CANDLE_INTERVAL;
+  const limit = Math.min(1000, Math.max(1, args.limit ?? 1000));
+
+  let rows: Array<[number, string, string, string, string, string, ...unknown[]]>;
+  try {
+    rows = (await request(
+      `/api/v3/klines?symbol=${encodeURIComponent(args.symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
+      undefined,
+      PRICE_BASE,
+    )) as Array<[number, string, string, string, string, string, ...unknown[]]>;
+  } catch (err) {
+    // Degrade, do not throw. An empty series makes technicalSnapshot() return
+    // null, which the Signal Agent already handles as "decide on news alone" —
+    // one flaky symbol must not take the whole tick down mid-demo. The reason is
+    // recorded rather than swallowed, because a silent fallback is how a broken
+    // seam hides behind output that still looks correct.
+    lastCandleErrors[args.symbol] = String(err);
+    console.warn(`[exchange] candles for ${args.symbol} unavailable:`, err);
+    return [];
+  }
+
+  delete lastCandleErrors[args.symbol];
+
+  return rows
+    .slice(0, -1)
+    .map(([t, o, h, l, c, v]) => ({
+      t,
+      o: Number(o),
+      h: Number(h),
+      l: Number(l),
+      c: Number(c),
+      v: Number(v),
+    }))
+    .filter((k) => Number.isFinite(k.c) && Number.isFinite(k.h) && Number.isFinite(k.l));
 }
 
 /** Non-zero spot balances on the account the keys belong to. */

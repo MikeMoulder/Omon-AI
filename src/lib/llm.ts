@@ -9,6 +9,7 @@
  * so the rest of the app never needs to know whether a model was reachable.
  */
 import type { Intel, Signal, Direction } from "@/lib/types";
+import type { Conviction, TechnicalSnapshot } from "@/lib/strategy";
 import { latestIntel } from "@/lib/fixtures";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -252,30 +253,71 @@ export async function intelFromHeadline(args: {
 }
 
 /**
- * Intelligence + live prices -> a trade idea. The model proposes; it never
- * authorizes. src/lib/budget.ts decides whether this is allowed to execute.
+ * Intelligence + live prices + the chart -> a trade idea. The model proposes;
+ * it never authorizes. src/lib/budget.ts decides whether this may execute.
+ *
+ * `snapshots` and `conviction` are optional and the agent degrades honestly
+ * without them: no candles means a news-only signal, and the returned Signal
+ * says so by leaving the conviction fields unset rather than defaulting them to
+ * something that looks measured.
  */
 export async function signalFromIntel(args: {
   intel: Intel;
   prices: Record<string, string>;
+  /** Per-symbol technical snapshots, keyed by trading pair. */
+  snapshots?: Record<string, TechnicalSnapshot | null>;
+  /** Pre-blended news-vs-chart agreement for the leading symbol. */
+  conviction?: Conviction;
 }): Promise<Signal> {
   const now = new Date().toISOString();
 
   if (fixturesActive("signal")) {
+    // Conviction is computed in plain code, not by the model, so the fixture
+    // path carries it too. Dropping it here would make the offline demo look
+    // like the chart was never consulted.
+    const c = args.conviction;
     return {
       id: `signal_${Date.now().toString(36)}`,
       intelId: args.intel.id,
       symbol: "BNBUSDT",
       side: args.intel.direction === "bearish" ? "SELL" : "BUY",
       sizeUsd: 10,
-      thesis: `Fixture signal derived from: ${args.intel.headline}`,
+      thesis: c
+        ? `Fixture signal — ${c.aligned ? "news and chart agree" : "news and chart disagree"} (${c.label} conviction) on: ${args.intel.headline}`
+        : `Fixture signal derived from: ${args.intel.headline}`,
       createdAt: now,
+      ...(c
+        ? {
+            convictionScore: c.score,
+            convictionLabel: c.label,
+            aligned: c.aligned,
+            convictionReasons: c.reasons,
+          }
+        : {}),
     };
   }
 
   const priceLines = Object.entries(args.prices)
     .map(([symbol, price]) => `${symbol}=${price}`)
     .join(" ");
+
+  // The chart, rendered as text the model can quote back. Without this the
+  // prompt held a bare spot price, which gives a model nothing to reason with —
+  // no trend, no volatility, no sense of where price sits in its own range.
+  const chartLines = Object.entries(args.snapshots ?? {})
+    .filter((entry): entry is [string, TechnicalSnapshot] => entry[1] !== null)
+    .map(([symbol, s]) =>
+      [
+        `${symbol}: ${s.regime} regime`,
+        `price ${s.trendStrengthPct >= 0 ? "+" : ""}${s.trendStrengthPct.toFixed(1)}% vs EMA200`,
+        `${s.toBreakoutHighPct >= 0 ? `${s.toBreakoutHighPct.toFixed(1)}% below` : `${Math.abs(s.toBreakoutHighPct).toFixed(1)}% above`} the 10-bar high`,
+        `ATR ${s.atrPct.toFixed(2)}%`,
+        `RSI ${s.rsi.toFixed(0)}`,
+        s.breakout ? `${s.breakout.toUpperCase()} BREAKOUT` : "no breakout",
+      ].join(", "),
+    );
+
+  const c = args.conviction;
 
   const out = await generate<{
     symbol: string;
@@ -285,17 +327,30 @@ export async function signalFromIntel(args: {
   }>(
     "signal",
     [
-      "You are a trading signal engine. Combine the intelligence below with live prices",
-      "and produce exactly one spot trade idea.",
+      "You are a trading signal engine. Combine the news intelligence, the live prices",
+      "and the technical picture below into exactly one SPOT trade idea.",
       `symbol: must be one of these exact trading pairs: ${Object.keys(args.prices).join(", ")}.`,
-      "sizeUsd: between 5 and 50. Scale with confidence — weak intelligence means a small size.",
-      "thesis: one sentence tying the trade back to the headline.",
+      "side: BUY or SELL. This is a spot account with no borrowing, so prefer BUY;",
+      "  only choose SELL to reduce an asset the account already holds.",
+      "sizeUsd: between 5 and 50. Size on AGREEMENT, not on either signal alone —",
+      "  news and chart pointing the same way earns a larger size than loud news",
+      "  against a hostile chart, which should be near the minimum.",
+      "thesis: one sentence. Cite one concrete number from the technical picture",
+      "  and tie it to the headline. Do not restate the headline alone.",
       "",
       `INTELLIGENCE: ${args.intel.summary}`,
       `ASSETS: ${args.intel.assets.join(", ")}`,
-      `DIRECTION: ${args.intel.direction}  CONFIDENCE: ${args.intel.confidence}`,
+      `NEWS DIRECTION: ${args.intel.direction}  CONFIDENCE: ${args.intel.confidence}`,
       `LIVE PRICES: ${priceLines}`,
-    ].join("\n"),
+      chartLines.length > 0
+        ? ["TECHNICALS:", ...chartLines.map((l) => `  ${l}`)].join("\n")
+        : "TECHNICALS: unavailable — decide on the news alone and keep the size small.",
+      c
+        ? `AGREEMENT: ${c.aligned ? "news and chart AGREE" : "news and chart DISAGREE"} (score ${c.score.toFixed(2)}, ${c.label} conviction)`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
     SIGNAL_SCHEMA,
   );
 
@@ -307,5 +362,13 @@ export async function signalFromIntel(args: {
     sizeUsd: Math.min(50, Math.max(5, out.sizeUsd)),
     thesis: out.thesis,
     createdAt: now,
+    ...(c
+      ? {
+          convictionScore: c.score,
+          convictionLabel: c.label,
+          aligned: c.aligned,
+          convictionReasons: c.reasons,
+        }
+      : {}),
   };
 }

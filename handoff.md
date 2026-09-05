@@ -47,8 +47,11 @@ code and a screen.
 | Futures order | FILLED | order `2635918071` — proven, then **cut from scope** |
 | Budget layer | 16 tests green | `npx tsx scripts/budget-test.ts` |
 | News -> intel -> cache | **working** | `npx tsx scripts/news-smoke.ts --live` |
-| Paid endpoint serves live rows | **working** | tx `0xdf36d0ba09ac3022a6c9d83f4761f2a3392c6eb2af88afccfae363f11e17501b` |
-| Cron tick (signal + order half) | **NOT BUILT — next** | — |
+| Paid endpoint serves live rows | **working** | tx `0xbe533fa76ce3f6b8fcf5b180e9d8a483cf0a3dafb5317bbea683fe65065d7266` |
+| Discovery without a directory | **working** | `npx tsx scripts/discovery-smoke.ts` — 21 checks |
+| Technical layer (EMA/ATR/breakout) | **working** | `npx tsx scripts/indicators-test.ts <ren-ai path>` — port matches the original on 19,980 bars |
+| Signal = news + chart conviction | **working** | `npx tsx scripts/strategy-smoke.ts --live` |
+| Cron tick (wiring + order half) | **NOT BUILT — next** | — |
 | Console + SSE | NOT BUILT | — |
 | Persistence | NOT BUILT | no database yet |
 | README + video | NOT BUILT | — |
@@ -71,9 +74,14 @@ src/lib/llm.ts         Gemini. intelFromHeadline() + signalFromIntel() + llmMode
                        both falling back to GEMINI_API_KEY.
 src/lib/exchange.ts    Binance. getPrices/getBalances/placeOrder + exchangeMode().
 src/lib/budget.ts      The leash. evaluateTrade() + spentToday(). No network, no model.
+src/lib/indicators.ts  ema/atr/rsi/priorRange. Pure math, ported from ren-ai, byte-checked.
+src/lib/strategy.ts    trendSignal + technicalSnapshot + conviction. The chart half.
+src/lib/service.ts     What Omon sells, machine-readable. Feeds the manifest AND the 402
+                       preview, so the two cannot drift.
 
 src/app/api/intel/route.ts          The paid endpoint. Serves the cache. WORKS — do not casually refactor.
 src/app/api/intel/refresh/route.ts  Free. GET = cache status, POST = collect news and analyse. The slow path.
+src/app/api/manifest/route.ts       Free public catalogue. Aliased to /.well-known/x402 by next.config.ts.
 src/app/page.tsx             Still the Next.js default page. This is the console's home.
 
 scripts/pay.mjs              Outside buyer. Pays a 402 for real.
@@ -81,6 +89,9 @@ scripts/llm-smoke.ts         Exercises both agents.
 scripts/exchange-smoke.ts    Prices, balances, and a real order.
 scripts/budget-test.ts       16 assertions. Run after any budget change.
 scripts/news-smoke.ts        Feeds -> intel -> cache. Asserts the TTL and the quota guard.
+scripts/discovery-smoke.ts   Walks the path a stranger's agent walks. Needs a running server.
+scripts/indicators-test.ts   Cross-checks the TS port against the original ren-ai JS.
+scripts/strategy-smoke.ts    intel -> candles -> conviction -> signal -> budget, end to end.
 ```
 
 **Seam discipline:** `src/lib/*.ts` are the only files that talk to the outside
@@ -104,11 +115,15 @@ npx tsx scripts/budget-test.ts                     # 16 tests, no credentials ne
 npx tsx scripts/news-smoke.ts                      # feeds + cache, fixtures, offline
 npx tsx scripts/news-smoke.ts --live               # real RSS + real Gemini
 npx tsx scripts/news-smoke.ts --live --feeds       # feeds only, spends no quota
+npx tsx scripts/strategy-smoke.ts --live          # candles -> conviction -> signal -> budget
+npx tsx scripts/strategy-smoke.ts --live --chart-only   # technicals only, no model call
+npx tsx scripts/indicators-test.ts ../ren-ai      # port vs original; skips if absent
 npx tsx scripts/llm-smoke.ts --live                # real Gemini call
 npx tsx scripts/exchange-smoke.ts --live           # prices + balances
 npx tsx scripts/exchange-smoke.ts --live --order   # places a REAL demo order
 npm run dev                                        # then in another shell:
 curl -X POST 'localhost:3000/api/intel/refresh?force=1'   # fill the cache first
+npx tsx scripts/discovery-smoke.ts                        # 21 checks, no payment
 MSYS_NO_PATHCONV=1 node scripts/pay.mjs /api/intel        # outside agent pays the 402
 ```
 
@@ -159,6 +174,16 @@ prize pool is what matters.
 
 ## 6. Traps that already cost hours
 
+**Setting `X402_RAIL=b402` without credentials makes `/api/intel` return 500.**
+Verified 2026-09-05. Fail-fast is the right call for a paid route — silently
+serving a rail nobody can pay would be worse — but on Vercel the only symptom is
+a 500 in the demo. Check the env var before recording.
+
+**The manifest must publish the request origin, not `RESOURCE_SERVER_URL`.** That
+variable belongs to the buyer script; using it pinned every advertised URL to
+`localhost:3000` regardless of what was actually serving. `PUBLIC_BASE_URL` is
+the override, and it should normally stay empty.
+
 **Binance runs three separate demo environments and they share nothing but the
 key.** Spot Demo `demo-api.binance.com`, Futures Demo `demo-fapi.binance.com`,
 Spot Testnet `testnet.binance.vision` (different keys entirely). A key from one
@@ -179,6 +204,19 @@ Google Cloud **project**, not per key. Two keys minted in the same project share
 one allowance, so the intel/signal split only isolates anything if the keys come
 from separate projects. `keysAreSplit()` reports whether two distinct keys are
 set — it cannot see the project, so verify that part by hand.
+
+**The model's symbol list and the budget allowlist must be the same list.** The
+Signal Agent picks from whatever was passed to `getPrices`; `evaluateTrade`
+approves from `BUDGET_ALLOWED_SYMBOLS`. If they drift, the model proposes a
+legal-looking pair and every trade is blocked — which reads as a broken model,
+not a config mismatch. Feed `limitsFromEnv().allowedSymbols` into `getPrices`,
+as `scripts/strategy-smoke.ts` does.
+
+**Market-data reads are always live, even when `DEMO_MODE=fixture`.**
+`exchangeMode()` governs *writes* (orders). Prices and candles are public
+endpoints needing no key, so they stay real — which means fixture mode is not
+fully offline. `getCandles` degrades to `[]` on failure rather than throwing, and
+the Signal Agent treats that as "decide on the news alone".
 
 **Gemini free quota is roughly 1,000 requests/day.** The tick makes 2 calls.
 **Never cron it every minute** — that is 2,880 calls/day and the account locks
@@ -215,6 +253,52 @@ never measured. BTC is near 79.6k and all four sources agree within a cent.
 Measure, then write it down.
 
 ---
+
+## 6b. Where the trading edge comes from
+
+The Signal Agent is no longer a model guessing from a headline. It now has a
+technical half, ported from **github.com/MikeMoulder/ren-ai** — the user's own
+Bitget-hackathon trading agent — and the port is verified bar-for-bar against the
+original JavaScript (`scripts/indicators-test.ts`, 19,980 bars, 0 mismatches).
+
+**What that agent's paper log actually shows** (42 closed trades, `trades.csv`):
+
+| | |
+|---|---|
+| Win rate | 47.6% |
+| Avg win / avg loss | +$228 / -$176, payoff 1.29 |
+| Expectancy | **+$16.03 per trade** |
+| Total | +$673 on $50k (+1.35%), max drawdown -3.21% |
+
+**The finding this design is built on:** the log scores every entry for
+"confluence" — sentiment agreeing with the technical signal. Split by it:
+
+| | n | win rate | total |
+|---|---|---|---|
+| Sentiment **aligned** with direction | 26 | 54% | **+$1,444** |
+| Sentiment **neutral** | 11 | 36% | **-$1,181** |
+
+Every dollar of profit came from aligned trades. **Say the sample size out loud
+if this goes in the video** — n=11 in the neutral bucket is a design lead, not a
+proven law. Overclaiming it is the kind of thing a judge catches.
+
+Omon's intel already emits `direction` + `confidence`, which *is* a confluence
+score. `conviction()` in `src/lib/strategy.ts` blends it with the chart and
+flags `aligned`. Observed working: bearish news against an up chart scored 0.12
+(low), and the model sized the trade at the $5 floor with a thesis citing
+"+1.3% above its EMA200".
+
+**Two deliberate departures from the original, both load-bearing:**
+
+1. **The breakout is advisory, not a gate.** A 10-bar breakout on 1h candles
+   fires perhaps once a week per symbol. Gating on it means a demo that shows
+   nothing. The chart is scored and handed to the model instead.
+2. **No shorts, no trailing stops.** Spot cannot short without holding the asset,
+   and a trailing stop needs a position monitor plus durable storage. The ren-ai
+   log agrees anyway: its shorts lost $284, its longs made $957.
+
+Interval is `CANDLE_INTERVAL`, default `1h` rather than the 4h the log was
+measured on — same rules, a clock a 2:15 demo can actually reach.
 
 ## 7. What to build next, in order
 

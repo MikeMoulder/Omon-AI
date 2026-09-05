@@ -12,6 +12,7 @@ import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
 import type { RouteConfig } from "@x402/core/server";
 import type { Network, SchemeNetworkServer } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { SERVICE_NAME, SERVICE_TAGS } from "@/lib/service";
 
 export type Rail = "testnet" | "b402";
 
@@ -72,11 +73,42 @@ export function paymentServer(): Promise<x402ResourceServer> {
   return serverPromise;
 }
 
-/** Route config for a paid endpoint, described once. */
-export function paidRoute(description: string): RouteConfig {
+/**
+ * Route config for a paid endpoint, described once.
+ *
+ * `serviceName` and `tags` are not decoration. Omon is not listed in any
+ * directory, so the 402 challenge itself has to carry the metadata a directory
+ * would have published — an agent handed only the URL still learns what this
+ * service is and what it sells. `preview` goes further: instead of the default
+ * empty `{}` body, an unpaid request gets a redacted sample and a pointer to
+ * the free manifest, which is what makes the endpoint explorable rather than
+ * merely payable.
+ */
+export function paidRoute(
+  description: string,
+  opts: { preview?: () => unknown; tags?: string[] } = {},
+): RouteConfig {
   return {
     accepts: [{ scheme: "exact", price, network, payTo }],
     description,
     mimeType: "application/json",
+    serviceName: SERVICE_NAME,
+    tags: opts.tags ?? SERVICE_TAGS,
+    unpaidResponseBody: () => ({
+      contentType: "application/json",
+      body: {
+        error: "payment required",
+        service: SERVICE_NAME,
+        description,
+        price,
+        network,
+        payTo,
+        // A machine that got here without knowing what we are can find out.
+        manifest: "/.well-known/x402",
+        howToPay:
+          "Retry this request with an X-PAYMENT header per the x402 spec. The 402 challenge carries the full payment requirements.",
+        preview: opts.preview?.() ?? null,
+      },
+    }),
   };
 }
