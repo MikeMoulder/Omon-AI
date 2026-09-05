@@ -134,11 +134,21 @@ export const ENDPOINTS: EndpointDoc[] = [
  * Which Binance Agent OS surfaces this product runs on, stated where a machine
  * (or a judge) can read it without cloning the repo.
  *
- * Written as a claim that can be checked: every tool named here is one
- * `scripts/mcp-smoke.ts` resolves against the live server, and the read/write
- * split is the actual code path in `src/lib/exchange.ts`, not an aspiration.
+ * Written as a claim that can be checked: every tool and command named here is
+ * one a smoke script resolves against the live service (`scripts/mcp-smoke.ts`,
+ * `scripts/skillhub-smoke.ts`), and the read/write split is the actual code
+ * path in `src/lib/exchange.ts`, not an aspiration.
+ *
+ * Two read surfaces are listed because Omon genuinely tries both, in order. MCP
+ * is first but its clients are allowlisted and Omon's self-published client_id
+ * is refused, so the Skill Hub CLI is what serves in practice. Both states are
+ * reported live rather than asserted — a manifest that claims an integration it
+ * does not have is worse than one that admits the gap.
  */
-export function agentOsUsage(mcp: { mode: "live" | "off"; reason: string }) {
+export function agentOsUsage(
+  mcp: { mode: "live" | "off"; reason: string },
+  cli: { mode: "live" | "off"; reason: string },
+) {
   return {
     platform: "Binance Agent OS",
     surfaces: [
@@ -151,6 +161,14 @@ export function agentOsUsage(mcp: { mode: "live" | "off"; reason: string }) {
         detail: mcp.reason,
       },
       {
+        surface: "Binance Skill Hub — binance-cli",
+        endpoint: "https://github.com/binance/binance-cli",
+        use: "Market reads when MCP is unavailable: prices and the OHLCV candles the strategy runs on. Needs no credentials, which is why this rail is the one that actually serves.",
+        commands: ["spot ticker-price", "spot klines"],
+        status: cli.mode === "live" ? "in use" : "not available",
+        detail: cli.reason,
+      },
+      {
         surface: "Binance Exchange API — Spot Demo Mode",
         endpoint: "https://demo-api.binance.com",
         use: "Order execution. A real matching engine with demo funds.",
@@ -159,7 +177,7 @@ export function agentOsUsage(mcp: { mode: "live" | "off"; reason: string }) {
     ],
     // The distinction a judge will ask about, answered before they ask.
     executionPolicy:
-      "Reads go through Binance MCP; order writes go through Spot Demo Mode REST. The MCP token authorises a real Binance account, so no order is ever placed over MCP.",
+      "Reads try Binance MCP, then the Skill Hub CLI, then plain REST, and /api/agent-os reports which rail actually served the last call. Order writes go through Spot Demo Mode REST only. The MCP token authorises a real Binance account, so no order is ever placed over MCP.",
   };
 }
 
@@ -170,13 +188,14 @@ export function serviceManifest(args: {
   payTo: string;
   rail: string;
   mcp: { mode: "live" | "off"; reason: string };
+  cli: { mode: "live" | "off"; reason: string };
 }): Record<string, unknown> {
   return {
     x402Version: 2,
     name: SERVICE_NAME,
     description: SERVICE_DESCRIPTION,
     tags: SERVICE_TAGS,
-    agentOs: agentOsUsage(args.mcp),
+    agentOs: agentOsUsage(args.mcp, args.cli),
     // Said plainly and first. Both money rails here are non-production, and a
     // buyer discovering this service deserves to know before it pays.
     disclosure:

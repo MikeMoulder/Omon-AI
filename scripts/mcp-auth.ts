@@ -30,6 +30,12 @@
 import crypto from "node:crypto";
 import http from "node:http";
 
+import dotenv from "dotenv";
+// Next reads .env.local automatically; a plain node script does not — and
+// PUBLIC_BASE_URL lives there, so without this the mint refuses to start with
+// "PUBLIC_BASE_URL is not set" even on a fully configured box.
+dotenv.config({ path: [".env.local", ".env"], quiet: true });
+
 import { writeTokenFile } from "@/lib/mcp";
 
 const AS = "https://agent.binance.com";

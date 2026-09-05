@@ -2,6 +2,306 @@
 
 *Written 2026-09-05. Read this top to bottom before touching anything.*
 
+## VPS deployment status (2026-09-05, evening)
+
+**The app is live on the public origin. START HERE steps 1 and 2 are done. Step
+3 — the MCP token — is the only thing still blocking, and it needs a human with
+a browser.**
+
+| | |
+|---|---|
+| Origin | `https://www.omon-ai.duckdns.org` (apex also served; both certed) |
+| Process | pm2 app `omon` — node 22.23.2, cwd `/root/Omon-AI`, `next start -p 3111` |
+| Edge | Caddy vhost -> `127.0.0.1:3111`, `flush_interval -1`, no `encode` |
+| Public paths | `/.well-known/oauth-client`, `/.well-known/x402`, `/api/agent-os` — all 200 `application/json` fetched from outside |
+| Discovery | `discovery-smoke.ts https://www.omon-ai.duckdns.org` — 21 checks, PASS |
+| Budget | `budget-test.ts` — 16/16 |
+| Build | `next build` green; `tsc --noEmit` green *after* the build (see traps) |
+| Exchange | **live** — `binance spot @ demo-api.binance.com`; balances read: 4994 USDT / 5000 USDC / 0.008 BNB |
+| LLM | **live** — Gemini structured output, 5.1s |
+| Full pipeline | **green live** — `news-smoke --live` PASS, `strategy-smoke --live` PASS (incl. the BLOCKED beat) |
+| MCP | **still OFF.** `mcp-smoke.ts` reports "no MCP token". Nothing has changed about the central caveat below |
+
+`pm2 save` has been run and `pm2-root` is enabled, so the process comes back
+after a reboot. Do not start a second instance — two processes sharing
+`.mcp-token.json` can race on renewal and invalidate each other (section 12.5).
+
+**Node 22 is now required, not optional.** `@bnb-chain/b402@0.2.1` declares
+`engines.node >=22` and this box defaults to node 20. npm install, the build,
+every `npx tsx` script and the pm2 process all run under node 22:
+
+```bash
+export PATH=/root/.nvm/versions/node/v22.23.2/bin:$PATH
+```
+
+**`.env.local` is COMPLETE as of 2026-09-05 evening.** The Windows secrets were
+pasted in and the file deduplicated: 44 keys, one assignment each, backed up to
+`.env.local.bak` (mode 600, gitignored). Every seam that needed a credential is
+now live — see the status table above.
+
+**TRAP — duplicate keys in `.env.local`, and LAST ONE WINS.** Pasting the Windows
+block onto the end of the file left 14 keys assigned twice, and the loader takes
+the final assignment (verified: `dotenv.parse` on `A=first\nA=second` yields
+`second`). That block ended with `DEMO_MODE=fixture`, which would have pinned the
+LLM, the exchange, MCP **and the Skill Hub rail** to recorded data while every
+banner honestly reported it — today's work silently inert. Two others were wrong
+the same way: `RESOURCE_SERVER_URL` back to `localhost:3000`, and a
+`PAY_TO_ADDRESS=0x...` placeholder ahead of the real address.
+
+Resolution is per key, not per position: secrets take the pasted value, but
+`DEMO_MODE`, `RESOURCE_SERVER_URL` and `PUBLIC_BASE_URL` take the VPS value
+wherever they appeared. If you ever paste an env block again, **re-check for
+duplicates before restarting**:
+
+```bash
+grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env.local | sort | uniq -d   # must print nothing
+```
+
+### Traps found during this deployment
+
+1. **An interrupted `npm install` leaves a `node_modules` that looks fine and is
+   not.** 309 packages present, `next` present — and `node_modules/.bin` empty,
+   so `next`, `tsc` and `tsx` are all "not found". Re-running install then dies
+   with `ENOTEMPTY`. Fix: `rm -rf node_modules` (it may need running twice) and
+   a clean install under node 22.
+2. **`npx tsc --noEmit` fails on a fresh tree until `next build` has run once.**
+   `layout.tsx` uses `LayoutProps`, which Next 16 generates into `.next/types`
+   during the build — you get `TS2304: Cannot find name 'LayoutProps'` and it is
+   not a real error. Build first. `next build` runs TypeScript itself anyway.
+3. **`pkill -f "next start -p 3111"` kills your own shell**, because the pattern
+   matches the command line containing it. Use `pgrep -af next-server` and kill
+   the pid.
+4. **`/api/mcp/callback` is advertised but does not exist.** `/api/oauth-client`
+   lists two redirect URIs; only the loopback `http://127.0.0.1:8788/callback`
+   has a listener behind it, and that is the one `scripts/mcp-auth.ts` uses, so
+   the mint is unaffected. Do not try to complete the flow against the https
+   redirect — it 404s. Either build the route or drop it from the document.
+5. **No `encode` on the Omon Caddy vhost, deliberately.** gzip buffers
+   Server-Sent Events and section 7's console needs `/api/stream`. Same reason
+   the `yolomarkets` block omits it; `flush_interval -1` is set.
+6. **`mcp-auth.ts` and `mcp-smoke.ts` were not reading `.env.local` — FIXED.**
+   `mcp-auth.ts` loaded no env file at all, so it refused to start with
+   "PUBLIC_BASE_URL is not set" on a fully configured box; `mcp-smoke.ts` used
+   `import "dotenv/config"`, which reads `.env` only, so the proof script was
+   reading a different environment than the app it proves. Both now use the
+   same `dotenv.config({ path: [".env.local", ".env"] })` line as every other
+   script. This works because the project has no `"type": "module"`, so tsx
+   emits CommonJS and `require` order follows statement order — the dotenv call
+   must stay **above** the `@/lib/...` import, which reads env at module level.
+7. **Never reuse an authorize URL from someone else's run.** The PKCE verifier
+   lives in the process that printed it, so a URL from a previous (or
+   terminated) run cannot complete. Run the script yourself, use the URL it
+   prints, and keep that process alive until the redirect lands.
+
+### BLOCKER — Binance refuses Omon's client_id (error 3346001)
+
+**Probed 2026-09-05, evening. This is the wall the token mint hits, and it is on
+Binance's side, not ours.**
+
+`scripts/mcp-auth.ts` now works end to end: Binance fetches
+`https://www.omon-ai.duckdns.org/.well-known/oauth-client`, renders the "Agentic
+Account Access" consent screen with the operator's account and an agentic-account
+picker — and then overlays a dialog:
+
+```text
+The AI Agent you are using is not currently supported.
+Please connect using a supported Agent to continue. (3346001-2c9886bb)
+```
+
+Everything of ours is correct: PUBLIC_BASE_URL, the client metadata document,
+PKCE, the loopback redirect. The refusal is of the **client identity**.
+
+**What the probe shows.** `/.well-known/oauth-authorization-server` still
+advertises `client_id_metadata_document_supported: true`, `/register` still
+404s, so there is no registration endpoint to call. But CIMD being *supported*
+does not mean any CIMD URL is *accepted* — Binance allowlists which agent
+clients may connect, and enforces it at the authorize step. Compare the client
+Claude Code uses, from its own credential store on this box:
+
+```text
+clientId: https://claude.ai/oauth/claude-code-client-metadata
+```
+
+Same mechanism, allowlisted URL. Ours is the same mechanism, unlisted URL.
+**Section 11b's "no headless path to a first token" was right but incomplete:
+there is no path to a first token for a self-published client at all.**
+
+**This retro-explains the 2026-09-05 "tools verified" row in section 2.**
+`spot_klines` / `spot_tickerPrice` / `spot_getAccount` on UID 1273695308 were
+called through *Claude Code's* MCP connection (`.mcp.json`, section 9), which is
+an allowlisted client — never through Omon's own client_id. The row is true and
+it is not evidence that Omon can mint a token.
+
+**Do not "solve" this by lifting Claude Code's token into `.mcp-token.json`.**
+It would present a credential minted for another client as Omon's own, which is
+precisely the control Binance is enforcing, in a hackathon Binance is judging.
+(On this box it is moot anyway — the stored `accessToken` is an empty string, so
+there is nothing there to copy.)
+
+**Confirming the diagnosis with Claude Code (optional, 2 minutes).** The
+`claude` CLI is on this box at `/opt/node22/bin/claude` — not on PATH, and its
+binary is named `claude.exe` despite being a Linux ELF. Call it by absolute path
+rather than prepending `/opt/node22/bin`, which would shadow the node 22.23.2
+the build is standardised on. Do **not** run `claude mcp add` — `.mcp.json`
+already registers this exact server; `claude mcp list` shows it as "Pending
+approval". Run `claude` in this directory, approve the project server, then
+`/mcp` to authenticate. It should succeed, because Claude Code authenticates as
+the allowlisted `https://claude.ai/oauth/claude-code-client-metadata`. **The
+token it mints belongs to Claude Code, not Omon** — `/api/agent-os` still reports
+`mode: "off"` afterwards, and moving that token into `.mcp-token.json` is the
+thing to avoid, per the paragraph above.
+
+**The only legitimate unblock is Binance allowlisting the client.** Ask the
+hackathon organisers, quoting error `3346001` and the client_id URL above. Do
+this early — it is a question with a possibly fast answer and a hard deadline.
+
+**If the answer is no, the product is not broken.** Every MCP read already
+degrades to REST and records the reason, `/api/agent-os` reports `mode: "off"`
+with that reason, and the discovery surfaces are live and honest. The claim that
+survives is "Agent OS-compatible discovery, MCP-routed reads, REST fallback
+recorded in the open" — which is true, demonstrable, and does not require a
+token. Say it that way in the video rather than implying a live MCP session.
+
+### THE WAY ROUND IT — the Skill Hub CLI is a second Agent OS surface
+
+**Found 2026-09-05 by reading a competing submission
+(`github.com/KattyFury/Binance-Agent`, Track A). Their agent claims "built on
+Binance Agent OS" and never touches the MCP endpoint at all.**
+
+There are **two** Agent OS surfaces, and this project only ever probed one:
+
+```text
+1. agent.binance.com/mcp/agentic   — MCP, OAuth-only, CLIENT ALLOWLISTED.
+                                     Blocked for us. Error 3346001.
+2. binance-cli (Skill Hub CLI)     — github.com/binance/binance-cli
+                                     github.com/binance/binance-skills-hub
+                                     HMAC API keys, or NOTHING for market data.
+                                     No OAuth. No allowlist. Not blocked.
+```
+
+**Installed and proven on this box, 2026-09-05.** `binance-cli 2.1.1`, official
+release, sha256 verified against the published checksum, at
+`/usr/local/bin/binance-cli`. Downloaded the tarball directly rather than piping
+their installer script into a root shell:
+
+```bash
+binance-cli spot ticker-price --symbol BNBUSDT     # {"symbol":"BNBUSDT","price":"773.76000000"}
+binance-cli spot klines --symbol BTCUSDT --interval 1h --limit 2
+```
+
+**Both ran with no credentials of any kind.** Market-data reads need none; only
+order placement needs the HMAC key/secret — the same Demo Trading keys Omon
+already provisions. It emits JSON on stdout and exits, so it is a `spawn` away.
+
+**`klines` returns the identical array-of-arrays shape as `/api/v3/klines`**, so
+`decodeKlines()` in `exchange.ts` parses it unchanged — the same property that
+made the MCP path a swap rather than a rewrite (section 11b). Routing reads
+through the CLI is therefore a third rail in a seam that already exists: add
+`via: "cli"` alongside the current `"mcp"` / `"rest"` in `mcpUsage()`.
+
+**Why this matters more than it looks.** The judge scorecard's biggest finding
+was "Agent OS is not in the product". Sections 11/11b answered that with MCP,
+and MCP is now blocked by a control we cannot influence before the deadline.
+The Skill Hub CLI answers the same finding, is unblocked today, and a competing
+entry is already being submitted on exactly that basis. **This is the highest
+value work left after the console.**
+
+One caveat worth an organiser question alongside the allowlist ask: confirm the
+Skill Hub CLI counts as "built with Agent OS" for judging. The evidence is good
+— Binance owns both repos, the hub is described as "an open skills marketplace
+that gives AI agents native access to crypto", and a rival entry leans on it —
+but it is worth hearing out loud rather than assumed.
+
+`spawn` note stolen from their code, and it is a real trap: `execFile`/`exec`
+leave the child's stdin as an open unwritten pipe and `binance-cli` hangs
+waiting on it. Spawn with `stdio: ['ignore','pipe','pipe']`.
+
+### Skill Hub rail — BUILT AND SERVING, 2026-09-05
+
+```text
+src/lib/skillhub.ts        cliMode / cliEnabled / runCli / cliPrice /
+                           cliKlines / cliHealth / SKILL_HUB_COMMANDS
+src/lib/exchange.ts        reads are now THREE rails, in order:
+                             1. Binance MCP     (blocked — client allowlist)
+                             2. Skill Hub CLI   <- what actually serves
+                             3. REST            (the floor)
+                           writes unchanged: Spot Demo Mode REST only.
+src/lib/mcp.ts             McpUse.via widened to "mcp" | "cli" | "rest".
+src/lib/service.ts         Skill Hub published as a manifest surface with live
+                           status; executionPolicy rewritten for three rails.
+/api/agent-os              reports `skillHub` alongside `mcp`.
+scripts/skillhub-smoke.ts  the counterpart to mcp-smoke.ts — FAILS if the read
+                           came over REST rather than an Agent OS rail.
+```
+
+**Proof, on the deployed origin:**
+
+```bash
+npx tsx scripts/skillhub-smoke.ts --verbose   # PASS — prices + candles via: cli
+curl https://www.omon-ai.duckdns.org/api/agent-os | jq .agentOs.skillHub
+# { "mode": "live", "version": "binance-cli 2.1.1" }
+curl https://www.omon-ai.duckdns.org/.well-known/x402 | jq '.agentOs.surfaces[].status'
+# "not connected"  (MCP)   "in use"  (Skill Hub)   "in use"  (Demo Mode)
+```
+
+`discovery-smoke.ts` still passes all 21 checks against the public origin.
+
+**The claim this makes true.** The candles `indicators.ts` and `strategy.ts` run
+on — the technical half of every signal Omon sells — are now fetched through
+Binance Agent OS for real, with no token and no allowlist. That is the judge
+scorecard's biggest finding answered in the product rather than in the README.
+
+**THE `symbols` TRAP, FULLY MAPPED.** Every rail rejects some batch form with
+`-1100 Illegal characters found in parameter 'symbols'`. The server's regex is
+`^\[("[\w\-._&&[^a-z]]{1,50}"(,"...")*)?\]$` — a Java character-class
+intersection reading "word characters EXCEPT lowercase". So **two** things break
+it, and the error message is identical for both:
+
+```text
+["BTCUSDT","BNBUSDT"]     OK
+["BTCUSDT", "BNBUSDT"]    -1100   one space after the comma
+["btcusdt","bnbusdt"]     -1100   lowercase — same error, different cause
+```
+
+All four verified live against demo-api 2026-09-05. `cliPrices()` upper-cases
+defensively for exactly that reason: a casing bug surfaces as what looks like a
+syntax error.
+
+Per rail:
+
+```text
+REST       batch OK, but only with a hand-built string (exchange.ts does this)
+MCP        batch IMPOSSIBLE — the MCP layer serialises the array itself and
+           inserts the fatal space. Loop one symbol per call. Section 11b.
+Skill Hub  --symbols FAILS (all forms, incl. the URL-encoded one its own --help
+           recommends, and a bare BTCUSDT,BNBUSDT list).
+           --json '{"symbols":[...]}' WORKS. Use that.
+```
+
+**Batching on the Skill Hub rail is worth real time**, unlike the other two: the
+cost there is process spawn, not network. Three symbols measured at **1.96s
+looped vs 0.60s batched — 3.3x** — and the gap widens with each symbol. This
+supersedes an earlier note in this file that said to leave the CLI loop alone;
+`getPrices()` now makes one `--json` call for the whole batch. The MCP loop
+still must stay a loop.
+
+**PATH matters for the deployed process.** `binance-cli` lives at
+`/usr/local/bin/binance-cli`. The pm2 process finds it because that directory is
+on its PATH — if `cliMode()` ever reports "not found" on the server, check the
+pm2 environment before anything else, and `pm2 restart omon --update-env`.
+`BINANCE_CLI_PATH` overrides the lookup if it ever needs pinning.
+
+### VPN (Windscribe) — unauthenticated, and NOT on the critical path
+
+Windscribe CLI 2.24.12 is installed, the helper service is active, and the
+dedicated `windscribe` user (uid 995) exists because the client refuses to run
+as root. `windscribe-cli status` still only answers "already running" — no
+authentication, no London connection, and credentials have to be typed
+interactively. **Nothing in this runbook depends on it.** Do not spend
+interactive time here before the token is minted.
+
+---
+
 **Deadline: 2026-09-08 23:59 UTC.** Roughly 3.5 days of wall clock, about 20-24
 hours of real build time for one person.
 
@@ -19,11 +319,11 @@ hours). Then section 7 for what to build.**
 
 ```text
 Do first, in order. Each blocks the next.
-  1. Confirm the repo you cloned is current. If src/lib/mcp.ts is missing, the
-     push never happened and you are looking at stale code — STOP and say so.
-  2. Serve the app on the public domain over HTTPS. /.well-known/oauth-client
-     MUST be reachable from the outside or the MCP token cannot be minted.
-  3. Get the MCP token onto the box (section 12). Verify with mcp-smoke.ts.
+  1. DONE (2026-09-05) — repo is current, src/lib/mcp.ts is present.
+  2. DONE (2026-09-05) — live at https://www.omon-ai.duckdns.org over HTTPS;
+     /.well-known/oauth-client returns JSON when fetched from outside.
+  3. NEXT, AND BLOCKING — get the MCP token onto the box (section 12.3).
+     Needs a human with a browser. Verify with mcp-smoke.ts.
   4. THEN build: the tick's trade half, then the console. Section 7.
 ```
 
@@ -88,6 +388,8 @@ code and a screen.
 | Cron tick (wiring + order half) | **NOT BUILT — next** | — |
 | Console + SSE | NOT BUILT | `page.tsx` is still the Next.js template. `/api/agent-os` is the status row's data source, waiting |
 | Persistence | NOT BUILT | no database yet — but a long-lived VPS process keeps the in-memory cache warm, which was the actual demo risk |
+| Skill Hub CLI rail | **LIVE — serving** | `binance-cli 2.1.1`; `skillhub-smoke.ts` passes, candles + prices both `via: "cli"` |
+| Deployed on the VPS | **live** | `https://www.omon-ai.duckdns.org` — pm2 `omon`, Caddy, 21 discovery checks pass against the public origin |
 | README | **written** | rewritten 2026-09-05, Agent OS section included. The create-next-app boilerplate is gone |
 | Video | NOT BUILT | the one mandatory Track A artifact |
 
@@ -862,6 +1164,11 @@ and `mcpUsage()` reports `via: "rest"` with the reason. Nothing fails silently.
 
 *Written 2026-09-05. Everything here is the deployment path; section 11b is what
 the code does and why.*
+
+**Steps 0-2 are already done on this box — see "VPS deployment status" at the
+top of this file for the concrete values.** Read them anyway to understand what
+was set up, but start at step 3. Wherever this section says `your-domain`, it is
+`www.omon-ai.duckdns.org`; the app listens on `127.0.0.1:3111` behind Caddy.
 
 ### 0. Confirm you have current code
 

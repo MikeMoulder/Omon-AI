@@ -8,8 +8,16 @@
  * Two Binance Agent OS surfaces meet in this file, and the split between them
  * is deliberate:
  *
- *   reads  (prices, candles)  Binance MCP first — see src/lib/mcp.ts — with the
- *                             REST calls below as the recorded fallback.
+ *   reads  (prices, candles)  Three rails, tried in order and every fall-through
+ *                             recorded:
+ *                               1. Binance MCP        src/lib/mcp.ts
+ *                               2. Skill Hub CLI      src/lib/skillhub.ts
+ *                               3. REST               the calls below
+ *                             MCP is first when a token exists, but its client
+ *                             is allowlisted and ours is refused, so in practice
+ *                             the Skill Hub CLI is the Agent OS rail that
+ *                             actually serves. REST is the floor that keeps the
+ *                             tick alive when both are down.
  *   writes (orders)           REST only, against Spot Demo Mode.
  *
  * Writes never go through MCP. The MCP token authorises the operator's real
@@ -22,6 +30,7 @@
 import crypto from "node:crypto";
 import type { OrderResult, Candle } from "@/lib/types";
 import { AGENT_OS_TOOLS, mcpCall, mcpEnabled, mcpMode, noteMcpUse } from "@/lib/mcp";
+import { SKILL_HUB_COMMANDS, cliEnabled, cliKlines, cliMode, cliPrices } from "@/lib/skillhub";
 
 // Binance SPOT Demo Mode, not Spot Testnet. Both are free and fund-free, but
 // Demo Mode mirrors the live exchange — same features, same exchange filters,
@@ -170,8 +179,25 @@ export async function getPrices(symbols: string[]): Promise<Record<string, strin
       noteMcpUse("prices", { via: "rest", reason: String(err) });
       console.warn("[exchange] mcp prices unavailable, falling back to REST:", err);
     }
+  }
+
+  // Skill Hub rail. Reached whenever MCP did not serve — no token, or a token
+  // that failed. Needs no credentials for market data, which is the whole
+  // reason it can carry the Agent OS claim when MCP cannot.
+  if (cliEnabled()) {
+    try {
+      // One process for the whole batch — see cliPrices(). This is the only one
+      // of the three rails where the batch form both works AND is worth having:
+      // the cost on this rail is process spawn, not network.
+      const prices = await cliPrices(symbols);
+      noteMcpUse("prices", { via: "cli", tool: SKILL_HUB_COMMANDS.prices });
+      return prices;
+    } catch (err) {
+      noteMcpUse("prices", { via: "rest", reason: String(err) });
+      console.warn("[exchange] skill hub prices unavailable, falling back to REST:", err);
+    }
   } else {
-    noteMcpUse("prices", { via: "rest", reason: mcpOffReason() });
+    noteMcpUse("prices", { via: "rest", reason: `${mcpOffReason()}; ${cliMode().reason}` });
   }
 
   const encoded = encodeURIComponent(`["${symbols.join('","')}"]`);
@@ -264,8 +290,26 @@ export async function getCandles(args: {
       noteMcpUse("candles", { via: "rest", reason: String(err) });
       console.warn(`[exchange] mcp candles for ${args.symbol} unavailable, falling back:`, err);
     }
+  }
+
+  // Skill Hub rail. `spot klines` returns the identical array-of-arrays shape as
+  // `/api/v3/klines`, so it decodes through the same `decodeKlines()` as the
+  // other two rails and the indicators cannot drift between them.
+  if (cliEnabled()) {
+    try {
+      const cliRows = (await cliKlines({ symbol: args.symbol, interval, limit })) as RawKline[];
+      const candles = decodeKlines(cliRows);
+      if (candles.length === 0) throw new ExchangeError("skill hub klines returned no usable candles");
+
+      noteMcpUse("candles", { via: "cli", tool: SKILL_HUB_COMMANDS.candles });
+      delete lastCandleErrors[args.symbol];
+      return candles;
+    } catch (err) {
+      noteMcpUse("candles", { via: "rest", reason: String(err) });
+      console.warn(`[exchange] skill hub candles for ${args.symbol} unavailable, falling back:`, err);
+    }
   } else {
-    noteMcpUse("candles", { via: "rest", reason: mcpOffReason() });
+    noteMcpUse("candles", { via: "rest", reason: `${mcpOffReason()}; ${cliMode().reason}` });
   }
 
   let rows: RawKline[];

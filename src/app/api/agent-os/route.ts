@@ -18,12 +18,13 @@
  */
 import { NextResponse } from "next/server";
 import { mcpHealth, mcpUsage, tokenHealth } from "@/lib/mcp";
+import { cliHealth } from "@/lib/skillhub";
 import { exchangeMode } from "@/lib/exchange";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const health = await mcpHealth();
+  const [health, skillHub] = await Promise.all([mcpHealth(), cliHealth()]);
 
   return NextResponse.json(
     {
@@ -35,6 +36,9 @@ export async function GET() {
           toolsResolved: health.resolved,
           ...(health.error ? { error: health.error } : {}),
         },
+        // The rail that actually serves, given MCP's client allowlist. Needs
+        // no credentials, so its "live" is not contingent on a token.
+        skillHub,
         // Credential state without the credential. `expiresInSeconds` is the
         // number that matters for an unattended run: when it is null the server
         // never stated a lifetime, which is not the same as "does not expire".

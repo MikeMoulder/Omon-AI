@@ -13,7 +13,11 @@
  * its bars over MCP rather than quietly falling back to REST. A fallback that
  * nobody notices is how an integration ends up existing only in the README.
  */
-import "dotenv/config";
+import dotenv from "dotenv";
+// `dotenv/config` reads .env only. This project's config lives in .env.local,
+// so the bare import left the proof script reading a different environment
+// than the app it is meant to be proving.
+dotenv.config({ path: [".env.local", ".env"], quiet: true });
 
 import { getAgentOsAccount, getCandles, getPrices, CANDLE_INTERVAL } from "@/lib/exchange";
 import { mcpHealth, mcpMode, mcpTools, mcpUsage, resolveTool, AGENT_OS_TOOLS } from "@/lib/mcp";

@@ -508,7 +508,11 @@ export function oauthClientDocument(baseUrl: string): Record<string, unknown> {
  * This exists because of the trap in handoff.md section 6: a silent fallback is
  * worse than a crash. Every fallback in `exchange.ts` records its reason here.
  */
-type McpUse = { via: "mcp" | "rest"; tool?: string; reason?: string; at: number };
+// `cli` is the Binance Skill Hub rail (src/lib/skillhub.ts), which sits
+// between MCP and REST. The name stays `McpUse` because this record is what
+// /api/agent-os publishes as the Agent OS usage view, and all three rails
+// answer the same question: which one actually served this read.
+type McpUse = { via: "mcp" | "cli" | "rest"; tool?: string; reason?: string; at: number };
 const uses: Record<string, McpUse> = {};
 
 export function noteMcpUse(operation: string, use: Omit<McpUse, "at">): void {
