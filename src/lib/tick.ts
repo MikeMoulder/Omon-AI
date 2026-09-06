@@ -38,9 +38,9 @@
  * opinion the Signal Agent gets to have.
  */
 import type { Decision, OrderResult, Signal, Venue } from "@/lib/types";
-import { evaluateTrade } from "@/lib/budget";
+import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { getPrices, placeOrder } from "@/lib/exchange";
-import { futuresMinNotional, placeFuturesOrder } from "@/lib/futures";
+import { futuresMark, futuresMinNotional, placeFuturesOrder, placeableNotional } from "@/lib/futures";
 import { computeFuturesPnl, computePnl } from "@/lib/pnl";
 import { refreshIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { refreshSignals, signalCacheStatus } from "@/lib/signal-cache";
@@ -227,7 +227,7 @@ async function beat(opts: {
     });
   }
 
-  const sizeUsd =
+  const requestedSizeUsd =
     opts.sizeUsd !== undefined && Number.isFinite(opts.sizeUsd) && opts.sizeUsd > 0
       ? opts.sizeUsd
       : signal.sizeUsd;
@@ -247,6 +247,30 @@ async function beat(opts: {
     venue === "futures" &&
     position.perpQty !== 0 &&
     Math.sign(position.perpQty) !== (signal.side === "BUY" ? 1 : -1);
+
+  // Round the notional up to something the exchange will actually accept.
+  //
+  // placeFuturesOrder() rounds the QUANTITY down to the symbol's step, so an
+  // approved $20.00 of ETHUSDT went out as 0.008 ETH — $19.99 at a 2499.10 mark
+  // — and bounced with "Order's notional must be no smaller than 20" on every
+  // beat for two hours. Snapping here rather than inside the order call is what
+  // keeps the guarantee that the size the budget layer approves is the size that
+  // reaches Binance: the snapped figure is what evaluateTrade() checks against
+  // the per-trade cap and what the ledger counts against the daily one. If the
+  // snap lands above the cap, the budget layer refuses it in words. Closes are
+  // left alone — see placeableNotional().
+  let sizeUsd = requestedSizeUsd;
+  if (venue === "futures" && !reduceOnly) {
+    try {
+      const mark = await futuresMark(signal.symbol);
+      sizeUsd = await placeableNotional(signal.symbol, requestedSizeUsd, mark);
+    } catch (err) {
+      // Sizing optimistically on a failed read matches futuresMinNotional():
+      // an order Binance refuses is visible in the console, one suppressed by a
+      // guess is not.
+      console.warn(`[tick] could not snap ${signal.symbol} to a placeable size:`, err);
+    }
+  }
 
   const decision = evaluateTrade({
     symbol: signal.symbol,
@@ -269,7 +293,12 @@ async function beat(opts: {
     intelId: signal.intelId,
     convictionLabel: signal.convictionLabel ?? null,
     ...(venue === "futures" ? { leverage, reduceOnly, marginUsd: sizeUsd / leverage } : {}),
-    ...(sizeUsd === signal.sizeUsd ? {} : { proposedSizeUsd: signal.sizeUsd, overridden: true }),
+    ...(requestedSizeUsd === signal.sizeUsd
+      ? {}
+      : { proposedSizeUsd: signal.sizeUsd, overridden: true }),
+    // The exchange's step, not an operator decision, so it is recorded as its
+    // own fact rather than folded into `overridden`.
+    ...(sizeUsd === requestedSizeUsd ? {} : { preSnapSizeUsd: requestedSizeUsd, snapped: true }),
   };
 
   if (decision.decision !== "ALLOW") {
@@ -303,6 +332,11 @@ async function beat(opts: {
             sizeUsd,
             leverage,
             reduceOnly,
+            // The ceiling for the drift guard: a mark that moves between the
+            // snap above and the order itself may cost a step, and clawing it
+            // back is allowed only up to the cap the operator set. See
+            // placeFuturesOrder().
+            maxNotionalUsd: limitsFromEnv().maxTradeUsd,
           })
         : await placeOrder({ symbol: signal.symbol, side: signal.side, sizeUsd });
   } catch (err) {
@@ -311,9 +345,28 @@ async function beat(opts: {
 
   // An ALLOW whose order failed is recorded with orderId null, so it does not
   // count against the daily budget — nothing was spent. The reason says why.
+  // What the exchange actually posted, which the drift guard can leave a step
+  // above the approved size. spentTodayUsd() sums this field, so the daily cap
+  // has to see the real notional and not the intended one.
+  const filledUsd = order ? Number(order.cummulativeQuoteQty) : NaN;
+  const posted = Number.isFinite(filledUsd) && filledUsd > 0 ? filledUsd : null;
+
   const action = recordAction({
     kind: "trade",
-    payload: order ? { ...payload, status: order.status, live: order.live } : payload,
+    payload: order
+      ? {
+          ...payload,
+          status: order.status,
+          live: order.live,
+          ...(posted === null
+            ? {}
+            : {
+                sizeUsd: posted,
+                ...(venue === "futures" ? { marginUsd: posted / leverage } : {}),
+                ...(posted === sizeUsd ? {} : { approvedSizeUsd: sizeUsd }),
+              }),
+        }
+      : payload,
     decision: decision.decision,
     reason: orderError ? `order failed: ${orderError}` : decision.reason,
     orderId: order?.orderId ?? null,

@@ -28,7 +28,12 @@
 import type { Intel, Signal } from "@/lib/types";
 import { CANDLE_INTERVAL, exchangeMode, getCandles, getPrices } from "@/lib/exchange";
 import { llmMode, signalFromIntel } from "@/lib/llm";
-import { conviction, technicalSnapshot, type TechnicalSnapshot } from "@/lib/strategy";
+import {
+  conviction,
+  technicalSnapshot,
+  type Conviction,
+  type TechnicalSnapshot,
+} from "@/lib/strategy";
 import { getIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { futuresEnabled, futuresMinNotional } from "@/lib/futures";
 import { readDoc, writeDoc } from "@/lib/store";
@@ -203,8 +208,23 @@ async function doRefresh(): Promise<Signal[]> {
       candles.length > 0 ? technicalSnapshot({ symbol, interval: CANDLE_INTERVAL, candles }) : null;
   }
 
-  const lead = symbols.find((s) => snapshots[s]) ?? symbols[0];
-  const conv = conviction({ intel, snapshot: snapshots[lead] ?? null });
+  // One score per symbol, not one for the list.
+  //
+  // This used to score `lead` — the first allowed symbol with candle history,
+  // which is BNBUSDT on any build whose BUDGET_ALLOWED_SYMBOLS starts with it —
+  // and hand that single number to the model for whatever symbol it then chose.
+  // The Signal carried it as its own conviction. Caught 2026-09-06 on a live
+  // row: an ETHUSDT short stored `convictionReasons` reading "2.0% below the
+  // 10-bar high" against a thesis citing ETH at 1.1%. BNB's chart was setting
+  // the size and the leverage rule for an ETH trade.
+  //
+  // Symbols with no candles still get an entry: conviction() scores those as
+  // "chart 0.00 (no candle history, news only)", which is the honest reading
+  // and keeps every choosable symbol addressable in the map.
+  const convictions: Record<string, Conviction> = {};
+  for (const symbol of symbols) {
+    convictions[symbol] = conviction({ intel, snapshot: snapshots[symbol] ?? null });
+  }
 
   // What each symbol actually costs to trade on futures. Resolved here because
   // src/lib/llm.ts must not do network I/O, and the model needs it: BTC perps
@@ -228,7 +248,7 @@ async function doRefresh(): Promise<Signal[]> {
     intel,
     prices,
     snapshots,
-    conviction: conv,
+    convictions,
     futuresMinimums,
   });
 

@@ -276,8 +276,24 @@ export async function signalFromIntel(args: {
   prices: Record<string, string>;
   /** Per-symbol technical snapshots, keyed by trading pair. */
   snapshots?: Record<string, TechnicalSnapshot | null>;
-  /** Pre-blended news-vs-chart agreement for the leading symbol. */
-  conviction?: Conviction;
+  /**
+   * Pre-blended news-vs-chart agreement, keyed by trading pair — one entry per
+   * symbol the model may choose from.
+   *
+   * Keyed, not a single score, and the difference is not cosmetic. This used to
+   * be one `Conviction` computed in src/lib/signal-cache.ts from `lead`, the
+   * first allowed symbol with candle history — BNBUSDT on every build whose
+   * BUDGET_ALLOWED_SYMBOLS starts with it. The model then picked whichever
+   * symbol it liked and the Signal carried BNB's score. Observed 2026-09-06:
+   * an ETHUSDT short shipped with `convictionReasons` reading "2.0% below the
+   * 10-bar high" while its own thesis cited ETH at 1.1% — two assets, one label,
+   * and the label was the wrong one. It drove the size and the leverage rule.
+   *
+   * Still computed in plain code before the model runs, so the model cannot
+   * decide how much the chart agreed with the news. It just gets scored per
+   * symbol now, and the Signal keeps the entry for the symbol actually chosen.
+   */
+  convictions?: Record<string, Conviction>;
   /**
    * Smallest tradable notional per symbol on futures, when known.
    *
@@ -297,7 +313,8 @@ export async function signalFromIntel(args: {
     // Conviction is computed in plain code, not by the model, so the fixture
     // path carries it too. Dropping it here would make the offline demo look
     // like the chart was never consulted.
-    const c = args.conviction;
+    // The fixture always trades BNBUSDT, so it reads that symbol's score.
+    const c = args.convictions?.BNBUSDT;
     // A bearish fixture goes short on futures when futures is on, so the
     // offline demo exercises both venues rather than only the long half.
     const bearish = args.intel.direction === "bearish";
@@ -345,7 +362,11 @@ export async function signalFromIntel(args: {
       ].join(", "),
     );
 
-  const c = args.conviction;
+  const agreementLines = Object.entries(args.convictions ?? {}).map(
+    ([symbol, c]) =>
+      `${symbol}: ${c.aligned ? "news and chart AGREE" : "news and chart DISAGREE"} ` +
+      `(score ${c.score.toFixed(2)}, ${c.label} conviction)`,
+  );
 
   // What the budget layer will actually accept, asked for rather than assumed.
   // REQUIRE_APPROVAL is a refusal as far as an unattended run is concerned, so
@@ -432,9 +453,9 @@ export async function signalFromIntel(args: {
       chartLines.length > 0
         ? ["TECHNICALS:", ...chartLines.map((l) => `  ${l}`)].join("\n")
         : "TECHNICALS: unavailable, decide on the news alone and keep the size small.",
-      c
-        ? `AGREEMENT: ${c.aligned ? "news and chart AGREE" : "news and chart DISAGREE"} (score ${c.score.toFixed(2)}, ${c.label} conviction)`
-        : "",
+      // Per symbol, because the model chooses the symbol. One blended number
+      // here would be a score for an asset it may not trade — see `convictions`.
+      agreementLines.length > 0 ? ["AGREEMENT:", ...agreementLines.map((l) => `  ${l}`)].join("\n") : "",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -445,6 +466,12 @@ export async function signalFromIntel(args: {
   // and asks for a venue that is off gets routed to spot rather than refused,
   // because a smaller honest trade beats a beat that produced nothing.
   const venue: Venue = perps && out.venue === "futures" ? "futures" : "spot";
+
+  // The score for the symbol the model actually chose, resolved AFTER the call
+  // because the symbol is an output. Undefined when the model names a pair that
+  // was never scored — the Signal then carries no conviction fields at all,
+  // which is the honest degradation this file already uses for a cold chart.
+  const c = args.convictions?.[out.symbol];
 
   return {
     id: `signal_${Date.now().toString(36)}`,

@@ -20,7 +20,12 @@ const CHART_ONLY = process.argv.includes("--chart-only");
 import { CANDLE_INTERVAL, exchangeMode, getCandles, getPrices } from "@/lib/exchange";
 import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { llmMode, signalFromIntel } from "@/lib/llm";
-import { conviction, technicalSnapshot, type TechnicalSnapshot } from "@/lib/strategy";
+import {
+  conviction,
+  technicalSnapshot,
+  type Conviction,
+  type TechnicalSnapshot,
+} from "@/lib/strategy";
 import { getLatestIntel, refreshIntel } from "@/lib/intel-cache";
 import { MAX_LEVERAGE, futuresEnabled, futuresMinNotional } from "@/lib/futures";
 import type { Intel } from "@/lib/types";
@@ -75,8 +80,16 @@ async function main() {
   }
 
   console.log("\n--- 3. conviction (news vs chart) ---");
+  // One score per symbol. The single `lead` score this used to build was always
+  // the first allowed symbol's, whatever the model went on to trade — see the
+  // `convictions` doc in src/lib/llm.ts. `conv` stays bound to the lead symbol
+  // because the checks just below assert on the scorer itself, not on a signal.
   const lead = symbols.find((s) => snapshots[s]) ?? symbols[0];
   const conv = conviction({ intel, snapshot: snapshots[lead] ?? null });
+  const convictions: Record<string, Conviction> = {};
+  for (const symbol of symbols) {
+    convictions[symbol] = conviction({ intel, snapshot: snapshots[symbol] ?? null });
+  }
   console.log(`  ${lead}: score ${conv.score.toFixed(2)}  ${conv.label}  aligned=${conv.aligned}`);
   for (const r of conv.reasons) console.log(`    · ${r}`);
   check("conviction score is in range", conv.score >= -1 && conv.score <= 1);
@@ -87,13 +100,33 @@ async function main() {
   console.log("\n--- 4. signal (model proposes) ---");
   const prices = await getPrices(symbols);
   const t0 = Date.now();
-  const signal = await signalFromIntel({ intel, prices, snapshots, conviction: conv });
+  const signal = await signalFromIntel({ intel, prices, snapshots, convictions });
   console.log(`  ${signal.side} ${signal.symbol} $${signal.sizeUsd} in ${Date.now() - t0}ms`);
   console.log(`  thesis: ${signal.thesis}`);
   console.log(`  conviction on signal: ${signal.convictionLabel ?? "(none)"} ${signal.convictionScore?.toFixed(2) ?? ""}`);
 
   check("signal names an allowed symbol", symbols.includes(signal.symbol.toUpperCase()),
     signal.symbol);
+
+  // The regression from 2026-09-06: the Signal used to carry the LEAD symbol's
+  // conviction whatever it traded, so an ETHUSDT short shipped with BNBUSDT's
+  // score driving its size and its leverage rule. Re-scoring the signal's own
+  // symbol here must reproduce exactly what the signal stored.
+  const own = conviction({ intel, snapshot: snapshots[signal.symbol] ?? null });
+  check(
+    "conviction on the signal is scored on the symbol the signal trades",
+    signal.convictionScore === undefined ||
+      Math.abs(signal.convictionScore - own.score) < 1e-9,
+    `signal ${signal.symbol} stored ${signal.convictionScore?.toFixed(4)}, ` +
+      `${signal.symbol} scores ${own.score.toFixed(4)}` +
+      (lead === signal.symbol ? "" : ` (lead is ${lead}, ${convictions[lead].score.toFixed(4)})`),
+  );
+  check(
+    "and its stated reasons are that symbol's chart, not the lead's",
+    signal.convictionReasons === undefined ||
+      JSON.stringify(signal.convictionReasons) === JSON.stringify(own.reasons),
+    (signal.convictionReasons ?? []).join(" | "),
+  );
   check("size is inside the model's stated band", signal.sizeUsd >= 5 && signal.sizeUsd <= 50);
   check("signal is traceable to its intel", signal.intelId === intel.id);
   check("conviction rides along on the signal", signal.convictionScore !== undefined);
@@ -132,7 +165,10 @@ async function main() {
       confidence: 0.8,
     };
 
-    const bearConviction = conviction({ intel: bearish, snapshot: snapshots[signal.symbol] ?? null });
+    const bearConvictions: Record<string, Conviction> = {};
+    for (const symbol of symbols) {
+      bearConvictions[symbol] = conviction({ intel: bearish, snapshot: snapshots[symbol] ?? null });
+    }
 
     // The same per-symbol floors src/lib/signal-cache.ts resolves before every
     // real refresh. Passing them is not test scaffolding: without them the model
@@ -155,7 +191,7 @@ async function main() {
       intel: bearish,
       prices,
       snapshots,
-      conviction: bearConviction,
+      convictions: bearConvictions,
       futuresMinimums,
     });
 

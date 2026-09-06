@@ -265,6 +265,166 @@ export async function quantityFor(symbol: string, notionalUsd: number, mark: num
   return rounded >= minQty ? rounded : 0;
 }
 
+/** Round a quantity UP to the step, with the same string round-trip roundToStep() uses. */
+function stepUp(qty: number, stepSize: number): number {
+  if (!Number.isFinite(stepSize) || stepSize <= 0) return qty;
+  const steps = Math.ceil(qty / stepSize - 1e-9);
+  const decimals = Math.max(0, Math.ceil(-Math.log10(stepSize) - 1e-9));
+  return Number((steps * stepSize).toFixed(decimals));
+}
+
+/** This symbol's LOT_SIZE, or the conservative defaults when it cannot be read. */
+async function lotFor(symbol: string): Promise<{ step: number; minQty: number }> {
+  try {
+    const f = (await symbolFilters()).get(symbol.toUpperCase());
+    return {
+      step: f?.stepSize && f.stepSize > 0 ? f.stepSize : 0.001,
+      minQty: f?.minQty && f.minQty > 0 ? f.minQty : 0,
+    };
+  } catch {
+    return { step: 0.001, minQty: 0 };
+  }
+}
+
+/**
+ * The smallest notional at or above `notionalUsd` that this symbol can actually
+ * place, in USDT.
+ *
+ * `quantityFor()` rounds the quantity DOWN to the step, so the notional that
+ * reaches Binance is nearly always a little under the one the budget layer
+ * approved. When the approved figure sits exactly on the symbol's floor, "a
+ * little under" is fatal. Measured 2026-09-06: ETHUSDT floor $20, step 0.001,
+ * mark 2499.10. An approved $20.00 becomes 20 / 2499.10 = 0.0080028, rounds
+ * down to 0.008, and posts $19.99 — seven tenths of a cent short. Binance
+ * answers -4164 "Order's notional must be no smaller than 20", and because
+ * nothing about the arithmetic changes, it answers it again on every beat.
+ *
+ * The snapping has to happen BEFORE the budget check, which is why this is a
+ * separate function and not a flag on quantityFor(). Sizing up is only safe
+ * when the number that gets approved is the number that gets posted; done at
+ * placement time it would post more than was allowed, which is the one thing
+ * the budget layer exists to prevent. src/lib/tick.ts calls this, then hands
+ * the result to evaluateTrade(), so the per-trade cap, the daily cap and the
+ * ledger all see the real figure — and a snap that lands above the cap is
+ * refused in words like any other oversized trade.
+ *
+ * Never call it for a close. Reduce-only orders are exempt from the floor at
+ * the exchange, and rounding a close UP sells more than the position holds.
+ *
+ * Returns `notionalUsd` untouched when the filters cannot be read, which leaves
+ * the pre-existing behaviour rather than inventing a size from a guess.
+ */
+export async function placeableNotional(
+  symbol: string,
+  notionalUsd: number,
+  mark: number,
+): Promise<number> {
+  if (!Number.isFinite(mark) || mark <= 0) return notionalUsd;
+  if (!Number.isFinite(notionalUsd) || notionalUsd <= 0) return notionalUsd;
+
+  let step: number;
+  let minQty: number;
+  try {
+    const f = (await symbolFilters()).get(symbol.toUpperCase());
+    if (!f) return notionalUsd;
+    step = f.stepSize;
+    minQty = f.minQty;
+  } catch {
+    return notionalUsd;
+  }
+
+  const floor = await futuresMinNotional(symbol, mark);
+
+  // Only ever close a ROUNDING gap, never a sizing gap.
+  //
+  // A request that is already below the floor is not a rounding problem, it is
+  // the model asking for a trade this symbol cannot do. Raising it to the floor
+  // would silently multiply the position: caught 2026-09-06 in strategy-smoke,
+  // where the model proposed SELL BTCUSDT $10 against a $50 floor, and snapping
+  // would have posted ~$56 — 5.6x a deliberately low-conviction idea. The model
+  // is TOLD each symbol's minimum in the prompt; ignoring it is an error worth
+  // surfacing, and src/lib/budget.ts already says so in words ("$10.00 is below
+  // the $50.00 minimum for BTCUSDT on futures"). Left alone, it gets refused.
+  //
+  // So the snap applies only from the floor upward, which is exactly the case
+  // this function exists for: $20.00 of ETHUSDT against a $20 floor, where the
+  // gap is a fraction of one step.
+  if (notionalUsd < floor) return notionalUsd;
+
+  let qty = stepUp(notionalUsd / mark, step);
+  if (qty < minQty) qty = stepUp(minQty, step);
+
+  // One ceil is normally enough. The loop covers the case where the ceil lands
+  // exactly on the floor and float error puts it a hair under, and it is bounded
+  // so a nonsense filter cannot spin here.
+  for (let i = 0; i < 3 && qty * mark < floor; i += 1) {
+    qty = stepUp(qty + step / 2, step);
+  }
+
+  // Up to the cent, not down. quantityFor() will divide this back by the mark
+  // and floor it to the step, and a notional that is a hair BELOW qty * mark
+  // floors to one step less — which is the exact bug this function exists to
+  // fix. The cushion is at most a cent of extra exposure and the cap sees it.
+  return Math.ceil(qty * mark * 100) / 100;
+}
+
+/**
+ * The quantity to actually send for an approved notional at this mark, in base
+ * units. Zero means "not placeable at all".
+ *
+ * The second half of the -4164 fix, and the half that covers the clock.
+ * `placeableNotional()` runs in src/lib/tick.ts against a mark read a moment
+ * before the order, and `quantityFor()` rounds DOWN against the mark read at
+ * placement. A mark that ticked up in between costs a whole step and puts the
+ * order back under the floor: at a 2498.87 ETHUSDT mark the tick approves
+ * $22.49, and if the mark is 2499.50 by the time the order goes out that is
+ * 0.008 ETH — $19.996, refused. The window is under a second wide and nothing
+ * about the next beat closes it, which is how this turns into two hours of
+ * identical console lines.
+ *
+ * Stepping up is bounded by `maxNotionalUsd`, the ceiling the budget layer
+ * enforces, so this can never post more than the operator allowed. It defaults
+ * to `notionalUsd`, which leaves the guard off for callers that have no cap to
+ * offer. Whatever actually fills is recorded from the exchange's own answer, so
+ * the daily cap counts the real notional and not the intended one.
+ */
+export async function placeableQuantity(
+  symbol: string,
+  notionalUsd: number,
+  mark: number,
+  maxNotionalUsd?: number,
+): Promise<number> {
+  if (!Number.isFinite(mark) || mark <= 0) return 0;
+  if (!Number.isFinite(notionalUsd) || notionalUsd <= 0) return 0;
+
+  const floor = await futuresMinNotional(symbol, mark);
+  const ceiling = Math.max(notionalUsd, maxNotionalUsd ?? notionalUsd);
+  const { step, minQty } = await lotFor(symbol);
+
+  let quantity = await quantityFor(symbol, notionalUsd, mark);
+
+  // Zero here means the round-down landed under LOT_SIZE.minQty, which is the
+  // same drift in its other form: BNBUSDT's floor IS minQty * mark, so an
+  // approved notional sitting on that floor falls to nothing the instant the
+  // mark ticks up. The smallest lot the symbol accepts is the honest starting
+  // point — still refused below if it does not fit the cap.
+  if (quantity <= 0) {
+    quantity = stepUp(Math.max(minQty, step), step);
+    if (quantity * mark > ceiling) return 0;
+  }
+
+  // A hair of tolerance, because `quantity * mark` and the `minQty * mark` inside
+  // futuresMinNotional() are the same product by two float routes and can differ
+  // in the last bit. Without it every BNBUSDT order buys a step it does not need.
+  for (let i = 0; i < 4 && quantity * mark < floor - 1e-9; i += 1) {
+    const next = stepUp(quantity + step / 2, step);
+    if (next * mark > ceiling) break;
+    quantity = next;
+  }
+
+  return quantity;
+}
+
 /** Latest mark for one symbol on the futures book. */
 export async function futuresMark(symbol: string): Promise<number> {
   const row = (await request(
@@ -408,6 +568,12 @@ export async function placeFuturesOrder(args: {
   sizeUsd: number;
   leverage?: number;
   reduceOnly?: boolean;
+  /**
+   * Hard ceiling for the drift guard below, in notional USDT. Defaults to
+   * `sizeUsd`, which disables it. src/lib/tick.ts passes the budget layer's own
+   * per-trade cap, because that is the number the operator actually set.
+   */
+  maxNotionalUsd?: number;
 }): Promise<OrderResult> {
   const { mode } = futuresMode();
   const symbol = args.symbol.toUpperCase();
@@ -457,10 +623,15 @@ export async function placeFuturesOrder(args: {
   const leverage = args.reduceOnly ? wantLeverage : await setLeverage(symbol, wantLeverage);
 
   const mark = await futuresMark(symbol);
-  const quantity = await quantityFor(symbol, args.sizeUsd, mark);
+  const floor = await futuresMinNotional(symbol, mark);
 
-  if (quantity <= 0) {
-    const floor = await futuresMinNotional(symbol, mark);
+  // Reduce-only is exempt from the floor at the exchange, and rounding a close UP
+  // would sell more than the position holds, so a close takes the plain rounding.
+  const quantity = args.reduceOnly
+    ? await quantityFor(symbol, args.sizeUsd, mark)
+    : await placeableQuantity(symbol, args.sizeUsd, mark, args.maxNotionalUsd);
+
+  if (quantity <= 0 || (!args.reduceOnly && quantity * mark < floor - 1e-9)) {
     throw new FuturesError(
       `$${args.sizeUsd.toFixed(2)} of ${symbol} is below the exchange minimum of ` +
         `$${floor.toFixed(2)} on futures`,
