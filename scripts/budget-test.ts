@@ -11,7 +11,12 @@ const LIMITS: BudgetLimits = {
   dailyTradeUsd: 100,
   allowedSymbols: ["BNBUSDT", "BTCUSDT"],
   requireApprovalAboveUsd: 25,
+  maxLeverage: 3,
 };
+
+// Futures is opt-in, and evaluateTrade() refuses a futures trade on a build
+// where it is off. The venue tests below assert the real rules, not the gate.
+process.env.FUTURES_ENABLED = "1";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -123,6 +128,190 @@ check("survives a malformed payload", () => {
     now,
   );
   assert.equal(total, 5);
+});
+
+console.log("\nspot sells — the inventory guard");
+
+check("blocks a spot sell when Omon holds nothing", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 10,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    side: "SELL",
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /nothing to sell/);
+});
+
+check("blocks a spot sell larger than the position", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    side: "SELL",
+    holdingUsd: 12,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /more BNB than Omon holds/);
+});
+
+check("allows a spot sell inside the position", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 10,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    side: "SELL",
+    holdingUsd: 12,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("a sell is exempt from the daily cap — the agent can always exit", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 100, // cap fully consumed
+    limits: LIMITS,
+    side: "SELL",
+    holdingUsd: 50,
+  });
+  assert.equal(d.decision, "ALLOW");
+  assert.match(d.reason, /exempt/);
+});
+
+check("a buy at the same spent total is still blocked", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 100,
+    limits: LIMITS,
+    side: "BUY",
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /daily cap/);
+});
+
+console.log("\nfutures");
+
+check("allows a futures short with no inventory — the point of the venue", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    venue: "futures",
+    side: "SELL",
+    leverage: 2,
+  });
+  assert.equal(d.decision, "ALLOW");
+  assert.match(d.reason, /margin at 2x/);
+});
+
+check("blocks leverage above the ceiling", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    venue: "futures",
+    side: "BUY",
+    leverage: 10,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /leverage ceiling/);
+});
+
+check("checks notional against the cap, not margin — leverage cannot widen it", () => {
+  // $20 at 4x posts $5 of margin. If the cap were checked against margin this
+  // would pass with $95 already spent; it must not.
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 95,
+    limits: LIMITS,
+    venue: "futures",
+    side: "BUY",
+    leverage: 2,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /daily cap/);
+});
+
+check("a reduce-only futures close is exempt from the cap", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 20,
+    spentTodayUsd: 100,
+    limits: LIMITS,
+    venue: "futures",
+    side: "BUY",
+    leverage: 2,
+    reduceOnly: true,
+  });
+  assert.equal(d.decision, "ALLOW");
+  assert.match(d.reason, /exempt/);
+});
+
+check("blocks a size below the symbol's own futures minimum", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT",
+    sizeUsd: 6,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    venue: "futures",
+    side: "SELL",
+    leverage: 1,
+    minNotionalUsd: 7.66, // BNB perps: minQty 0.01 at a ~766 mark
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /below the \$7\.66 minimum for BNBUSDT on futures/);
+});
+
+check("says a symbol is untradable when its floor is above the cap", () => {
+  // BTCUSDT perps want $50 of notional, which no $25 trade can reach. Saying so
+  // once beats refusing every size one at a time.
+  const d = evaluateTrade({
+    symbol: "BTCUSDT",
+    sizeUsd: 25,
+    spentTodayUsd: 0,
+    limits: LIMITS,
+    venue: "futures",
+    side: "BUY",
+    leverage: 1,
+    minNotionalUsd: 50,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /needs \$50\.00 minimum on futures, above the \$25 per-trade cap/);
+});
+
+check("spentToday ignores closes but counts opens", () => {
+  const total = spentToday(
+    [
+      { kind: "trade", decision: "ALLOW", orderId: "1", payload: { sizeUsd: 20, side: "BUY" }, createdAt: iso(HOUR) },
+      { kind: "trade", decision: "ALLOW", orderId: "2", payload: { sizeUsd: 20, side: "SELL" }, createdAt: iso(HOUR) },
+      {
+        kind: "trade",
+        decision: "ALLOW",
+        orderId: "3",
+        payload: { sizeUsd: 30, side: "SELL", venue: "futures" },
+        createdAt: iso(HOUR),
+      },
+      {
+        kind: "trade",
+        decision: "ALLOW",
+        orderId: "4",
+        payload: { sizeUsd: 15, side: "BUY", venue: "futures", reduceOnly: true },
+        createdAt: iso(HOUR),
+      },
+    ],
+    now,
+  );
+  // BUY spot 20 counts. Spot SELL is a close. Futures SELL 30 OPENS a short, so
+  // it counts. The reduce-only futures BUY is a close.
+  assert.equal(total, 50);
 });
 
 console.log(`\n${passed} passed\n`);

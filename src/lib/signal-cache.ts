@@ -30,6 +30,7 @@ import { CANDLE_INTERVAL, exchangeMode, getCandles, getPrices } from "@/lib/exch
 import { llmMode, signalFromIntel } from "@/lib/llm";
 import { conviction, technicalSnapshot, type TechnicalSnapshot } from "@/lib/strategy";
 import { getIntel, intelCacheStatus } from "@/lib/intel-cache";
+import { futuresEnabled, futuresMinNotional } from "@/lib/futures";
 import { readDoc, writeDoc } from "@/lib/store";
 
 /** What `data/signals.json` holds. Rows newest first, exactly as memory holds them. */
@@ -172,7 +173,7 @@ async function doRefresh(): Promise<Signal[]> {
   // (the refresh route, the tick) reach this line with a cold cache after any
   // restart, so the guard lives here rather than only in revalidateSignals().
   if (source === "fixture") {
-    lastError = "intel cache is cold — refresh intel before building a signal";
+    lastError = "intel cache is cold: refresh intel before building a signal";
     return rows;
   }
 
@@ -205,7 +206,31 @@ async function doRefresh(): Promise<Signal[]> {
   const lead = symbols.find((s) => snapshots[s]) ?? symbols[0];
   const conv = conviction({ intel, snapshot: snapshots[lead] ?? null });
 
-  const signal = await signalFromIntel({ intel, prices, snapshots, conviction: conv });
+  // What each symbol actually costs to trade on futures. Resolved here because
+  // src/lib/llm.ts must not do network I/O, and the model needs it: BTC perps
+  // want $50 of notional against a $25 per-trade cap, so without this the model
+  // proposes BTC shorts that are structurally impossible to fill.
+  const futuresMinimums: Record<string, number> = {};
+  if (futuresEnabled()) {
+    for (const symbol of symbols) {
+      const mark = Number(prices[symbol]);
+      if (!Number.isFinite(mark) || mark <= 0) continue;
+      try {
+        futuresMinimums[symbol] = await futuresMinNotional(symbol, mark);
+      } catch {
+        // An unknown floor leaves the symbol out of the prompt's tradable list,
+        // which is the safe direction: the model proposes one it can fill.
+      }
+    }
+  }
+
+  const signal = await signalFromIntel({
+    intel,
+    prices,
+    snapshots,
+    conviction: conv,
+    futuresMinimums,
+  });
 
   analysed.add(intel.id);
   rows = [signal, ...rows].slice(0, MAX_ROWS);

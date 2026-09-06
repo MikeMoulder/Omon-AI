@@ -1,26 +1,265 @@
 @import "tailwindcss";
 
+/* ==========================================================================
+ * Omon design system
+ *
+ * One dark palette, committed. This is a trading console that will be watched
+ * on a projector in a room with the lights down, and a theme toggle is a demo
+ * risk with no demo upside.
+ *
+ * Rules the whole screen obeys:
+ *   - Neutrals carry the interface. ONE brand accent, on the primary action
+ *     and the live state, nowhere else.
+ *   - Green and red mean MONEY, and nothing else. Never a status, never a
+ *     decoration. If it is green on this page, it made money.
+ *   - Border over shadow. A 1px edge survives a projector; a shadow stack
+ *     turns into grey mud.
+ *   - Four type sizes and one radius. Weight and colour carry hierarchy.
+ *
+ * Token architecture follows ren-ai's, so the two projects read as siblings.
+ * The accent is Omon's own: Binance gold, for the hackathon this was built in.
+ * ========================================================================== */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+
+  /* Surfaces, darkest to lightest. */
+  --void: #08090c;
+  --base: #0b0d11;
+  --panel: #101318;
+  --panel2: #151920;
+  --elev: #1b2029;
+  --edge: #232833;
+  --edge2: #2f3542;
+
+  /* Text, brightest to faintest. */
+  --ink: #eef0f4;
+  --ink2: #c2c8d4;
+  --muted: #7d8593;
+  --faint: #565d6a;
+
+  /* One accent. */
+  --brand: #f0b90b;
+  --brand-dim: #7a5f08;
+
+  /* Money only. */
+  --up: #21d07a;
+  --down: #f6465d;
+  --warn: #f0a23c;
+
+  --sheen: rgba(255, 255, 255, 0.028);
+  --grid: rgba(255, 255, 255, 0.02);
+  --scroll: #262b34;
+  --scroll-hover: #343b48;
+  --skel-a: #14181e;
+  --skel-b: #1c222a;
+
+  --radius: 12px;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-void: var(--void);
+  --color-base: var(--base);
+  --color-panel: var(--panel);
+  --color-panel2: var(--panel2);
+  --color-elev: var(--elev);
+  --color-edge: var(--edge);
+  --color-edge2: var(--edge2);
+
+  --color-ink: var(--ink);
+  --color-ink2: var(--ink2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-brand: var(--brand);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-warn: var(--warn);
+
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  background: var(--void);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-hover);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- type helpers ---------- */
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The only label style on the page. Everything above a number looks like this. */
+.eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* ---------- surfaces ---------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.card-hover {
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
+}
+.card-hover:hover {
+  border-color: var(--edge2);
+  background: var(--panel2);
+}
+
+/* Top-lit sheen. The one piece of decoration on the page. */
+.sheen {
+  position: relative;
+}
+.sheen::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, var(--sheen), transparent 40%);
+  pointer-events: none;
+}
+
+.grid-bg {
+  background-image: radial-gradient(var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ---------- animation ---------- */
+
+@keyframes omon-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes omon-ring {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+@keyframes omon-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes omon-sweep {
+  0% {
+    background-position: -160% 0;
+  }
+  100% {
+    background-position: 160% 0;
+  }
+}
+
+/* A row that just arrived. Brand-tinted, fades out on its own. */
+@keyframes omon-flash {
+  0% {
+    background-color: rgba(240, 185, 11, 0.16);
+    border-color: rgba(240, 185, 11, 0.5);
+  }
+  100% {
+    background-color: transparent;
+    border-color: var(--edge);
+  }
+}
+
+/* Entrance. Staggered by inline delay, capped at 8 rows by the caller. */
+.rise {
+  animation: omon-rise 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.flash {
+  animation: omon-flash 2.4s ease-out forwards;
+}
+
+.skel {
+  background: linear-gradient(90deg, var(--skel-a) 25%, var(--skel-b) 37%, var(--skel-a) 63%);
+  background-size: 200% 100%;
+  animation: omon-sweep 1.4s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* ---------- focus ---------- */
+
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* ---------- reduced motion ----------
+ * Everything above is entrance polish and none of it carries meaning, so it
+ * can all be switched off without the page losing information.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

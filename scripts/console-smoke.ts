@@ -72,34 +72,72 @@ type Snapshot = {
   money: { in: unknown[]; out: unknown[] };
   payment: { price: string; network: string };
   prices: Record<string, string>;
+  maxLeverage: number;
   pnl: {
-    positions: Array<{ symbol: string; qty: number; markPrice: number | null }>;
-    realizedUsd: number;
-    unrealizedUsd: number;
+    spot: VenueSide & {
+      positions: Array<{ symbol: string; qty: number; markPrice: number | null }>;
+    };
+    futures: VenueSide & {
+      positions: Array<{
+        symbol: string;
+        qty: number;
+        markPrice: number | null;
+        direction: "long" | "short" | "flat";
+        entryPrice: number;
+        notionalUsd: number;
+        marginUsd: number;
+        leverage: number;
+        unrealizedUsd: number | null;
+      }>;
+      longCount: number;
+      shortCount: number;
+      marginUsd: number;
+    };
     totalUsd: number;
-    openCount: number;
     fillCount: number;
-    unpriced: string[];
   };
 };
 
+type VenueSide = {
+  realizedUsd: number;
+  unrealizedUsd: number;
+  totalUsd: number;
+  openCount: number;
+  fillCount: number;
+  unpriced: string[];
+};
+
 async function main(): Promise<void> {
-  console.log(`\nconsole smoke — ${base}\n`);
+  console.log(`\nconsole smoke: ${base}\n`);
 
   const page = await fetch(base);
   check("the console answers", page.ok, `http ${page.status}`);
   const html = await page.text();
   check("it is no longer the create-next-app template", !html.includes("To get started, edit the"));
-  check("it mounts against the stream", html.includes("/api/stream"));
+  // The page mounts its EventSource from a client chunk, so the URL is in the
+  // shipped JavaScript rather than in the HTML. Asserting on the HTML passed by
+  // accident until the console was rewritten, which is the worst way for a test
+  // to pass: it was checking that a string existed somewhere, not that the page
+  // actually connects. Fetch the chunks and look for it properly.
+  const scripts = [...html.matchAll(/src="(\/_next\/static\/[^"]+\.js)"/g)].map((m) => m[1]);
+  let mounts = false;
+  for (const src of scripts) {
+    const chunk = await (await fetch(`${base}${src}`)).text();
+    if (chunk.includes("/api/stream")) {
+      mounts = true;
+      break;
+    }
+  }
+  check("it mounts against the stream", mounts, `${scripts.length} chunk(s) checked`);
 
   console.log("\nstream");
   const snapshot = (await firstFrame(`${base}/api/stream`)) as Snapshot;
   check("the first frame arrives immediately", Boolean(snapshot));
 
-  const seams = ["intelAgent", "signalAgent", "news", "exchange", "mcp", "skillHub"];
+  const seams = ["intelAgent", "signalAgent", "news", "exchange", "futures", "mcp", "skillHub"];
   for (const seam of seams) {
     const row = snapshot.seams?.[seam];
-    check(`${seam} reports a mode`, Boolean(row?.mode), row ? `${row.mode} — ${row.reason}` : "");
+    check(`${seam} reports a mode`, Boolean(row?.mode), row ? `${row.mode}: ${row.reason}` : "");
   }
 
   check(
@@ -120,30 +158,76 @@ async function main(): Promise<void> {
   const pnl = snapshot.pnl;
   check(
     "profit and loss is in the snapshot",
-    Boolean(pnl) && typeof pnl.totalUsd === "number" && Array.isArray(pnl.positions),
+    Boolean(pnl) && typeof pnl.totalUsd === "number" && Boolean(pnl.spot) && Boolean(pnl.futures),
     pnl ? `${pnl.fillCount} fill(s), $${pnl.totalUsd.toFixed(4)} total` : "missing",
   );
 
   if (pnl) {
+    // The venues are shown side by side on the console, so the split has to be
+    // real in the data rather than a label over one shared number.
     check(
-      "realised and open add up to the total",
-      Math.abs(pnl.realizedUsd + pnl.unrealizedUsd - pnl.totalUsd) < 1e-9,
-      `${pnl.realizedUsd.toFixed(4)} + ${pnl.unrealizedUsd.toFixed(4)} = ${pnl.totalUsd.toFixed(4)}`,
+      "spot and futures are accounted separately",
+      Array.isArray(pnl.spot.positions) && Array.isArray(pnl.futures.positions),
+      `${pnl.spot.fillCount} spot fill(s), ${pnl.futures.fillCount} futures fill(s)`,
     );
+    check(
+      "the two venues add up to the headline",
+      Math.abs(pnl.spot.totalUsd + pnl.futures.totalUsd - pnl.totalUsd) < 1e-9,
+      `${pnl.spot.totalUsd.toFixed(4)} + ${pnl.futures.totalUsd.toFixed(4)} = ${pnl.totalUsd.toFixed(4)}`,
+    );
+    check(
+      "no fill is counted on both venues",
+      pnl.spot.fillCount + pnl.futures.fillCount === pnl.fillCount,
+      `${pnl.fillCount} total`,
+    );
+
+    for (const [name, side] of [
+      ["spot", pnl.spot],
+      ["futures", pnl.futures],
+    ] as const) {
+      check(
+        `${name}: realised and open add up`,
+        Math.abs(side.realizedUsd + side.unrealizedUsd - side.totalUsd) < 1e-9,
+        `${side.realizedUsd.toFixed(4)} + ${side.unrealizedUsd.toFixed(4)} = ${side.totalUsd.toFixed(4)}`,
+      );
+    }
+
     // An open position with no mark is excluded from the totals rather than
-    // counted as zero — so it must be named, or the number is quietly partial.
-    const unmarked = pnl.positions.filter((row) => row.qty > 0 && row.markPrice === null);
+    // counted as zero, so it must be named or the number is quietly partial.
+    const unmarked = pnl.spot.positions.filter((row) => row.qty > 0 && row.markPrice === null);
     check(
-      "every unpriced position is declared",
-      unmarked.every((row) => pnl.unpriced.includes(row.symbol)),
-      unmarked.length === 0 ? "all positions priced" : pnl.unpriced.join(" "),
+      "every unpriced spot position is declared",
+      unmarked.every((row) => pnl.spot.unpriced.includes(row.symbol)),
+      unmarked.length === 0 ? "all positions priced" : pnl.spot.unpriced.join(" "),
     );
     check(
-      "open positions are marked at the prices on screen",
-      pnl.positions
+      "open spot positions are marked at the prices on screen",
+      pnl.spot.positions
         .filter((row) => row.qty > 0 && row.markPrice !== null)
         .every((row) => Number(snapshot.prices?.[row.symbol]) === row.markPrice),
-      `${pnl.openCount} open`,
+      `${pnl.spot.openCount} open`,
+    );
+
+    // The sign test, on live data. A short that reports profit while the mark
+    // sits above its entry is the one futures bug that looks plausible on
+    // screen, so it is asserted here and not only in the unit tests.
+    const wrongWay = pnl.futures.positions.filter((row) => {
+      if (row.qty === 0 || row.markPrice === null || row.unrealizedUsd === null) return false;
+      const expected = Math.sign((row.markPrice - row.entryPrice) * Math.sign(row.qty));
+      return expected !== 0 && Math.sign(row.unrealizedUsd) !== expected;
+    });
+    check(
+      "every futures position has its profit the right way round",
+      wrongWay.length === 0,
+      `${pnl.futures.longCount} long, ${pnl.futures.shortCount} short`,
+    );
+
+    check(
+      "futures margin never exceeds its own exposure",
+      pnl.futures.positions.every(
+        (row) => row.qty === 0 || row.marginUsd <= row.notionalUsd + 1e-9,
+      ),
+      `$${pnl.futures.marginUsd.toFixed(2)} margin, ${snapshot.maxLeverage}x ceiling`,
     );
   }
 
@@ -157,7 +241,7 @@ async function main(): Promise<void> {
       check(
         "the budget layer ruled on it",
         ["ALLOW", "BLOCK", "REQUIRE_APPROVAL"].includes(beat.decision.decision),
-        `${beat.decision.decision} — ${beat.decision.reason}`,
+        `${beat.decision.decision}: ${beat.decision.reason}`,
       );
     }
 

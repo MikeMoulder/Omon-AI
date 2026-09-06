@@ -31,8 +31,25 @@
  * An open position with no live price is reported with `markPrice: null` and
  * excluded from the unrealised total, and its symbol is listed in `unpriced`.
  * A missing price must read as missing, never as a zero that drags P&L down.
+ *
+ * ## Spot and futures are accounted separately, and never summed into one row
+ *
+ * `computePnl()` is spot. `computeFuturesPnl()` is futures. They are different
+ * arithmetic, not a shared function with a flag:
+ *
+ *   - a spot position is long-only, and its cost basis is money that actually
+ *     left the account;
+ *   - a perp position is SIGNED, its "cost" is margin posted rather than spent,
+ *     it can flip from long to short in a single fill, and a short profits when
+ *     the mark falls, which average-cost spot arithmetic reports as a loss.
+ *
+ * Running futures fills through the spot fold does not merely mis-round, it
+ * reports the sign backwards on every short. The two totals are shown side by
+ * side on the console for the same reason trading profit and x402 revenue are:
+ * one combined number would imply a fungibility that is not there.
  */
 import type { Fill } from "@/lib/types";
+import { venueOf } from "@/lib/types";
 
 /** Below this, a residual position is float noise from average-cost arithmetic. */
 const DUST_QTY = 1e-12;
@@ -101,9 +118,14 @@ type Pot = {
  * at the top of the page, so the mark used in the profit is the mark on screen.
  */
 export function computePnl(fills: Fill[], marks: Record<string, string> = {}): PnlSummary {
+  // Spot only. Futures rows go to computeFuturesPnl() — running them through
+  // this fold would report every short's sign backwards. Rows written before
+  // futures existed carry no venue and are spot, which is what they were.
+  const spotOnly = fills.filter((f) => venueOf(f) === "spot");
+
   // Order matters — average cost is path dependent. Callers hold rows newest
   // first, so this sort is doing real work, not tidying.
-  const ordered = [...fills].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const ordered = [...spotOnly].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const pots = new Map<string, Pot>();
 
   for (const fill of ordered) {
@@ -205,5 +227,246 @@ export function computePnl(fills: Fill[], marks: Record<string, string> = {}): P
     fillCount: ordered.length,
     unpriced,
     unbasedSells,
+  };
+}
+
+/**
+ * One perpetual position, folded from this ledger's futures fills.
+ *
+ * `qty` is SIGNED and that is the entire difference from `Position` above.
+ * Negative is a short: it profits when the mark falls, and any arithmetic that
+ * treats it as a smaller long gets the sign of the profit wrong rather than the
+ * magnitude.
+ */
+export type PerpPosition = {
+  symbol: string;
+  /** Signed base quantity. Negative is short, zero is flat. */
+  qty: number;
+  direction: "long" | "short" | "flat";
+  /** Volume-weighted entry for the open quantity. Zero when flat. */
+  entryPrice: number;
+  /** |qty| * entry. The exposure this position carries. */
+  notionalUsd: number;
+  /** notional / leverage. What it actually ties up. */
+  marginUsd: number;
+  /** Leverage of the fills that opened the position now standing. */
+  leverage: number;
+  markPrice: number | null;
+  /** Signed open profit, or null when unpriced. */
+  unrealizedUsd: number | null;
+  /** Open profit against notional, so it compares like-for-like with spot. */
+  unrealizedPct: number | null;
+  /**
+   * Open profit against margin posted — the leveraged return, and the number a
+   * futures trader actually means by "up 6%". Shown next to the notional one
+   * rather than instead of it, because at 3x they differ by a factor of three
+   * and a single unlabelled percentage would be a lie in one direction or the
+   * other.
+   */
+  returnOnMarginPct: number | null;
+  /** Booked profit from closes so far. Survives the position going flat. */
+  realizedUsd: number;
+  fills: number;
+  lastFillAt: string;
+};
+
+export type FuturesPnlSummary = {
+  positions: PerpPosition[];
+  realizedUsd: number;
+  unrealizedUsd: number;
+  totalUsd: number;
+  /** Exposure across open positions. What the daily cap is denominated in. */
+  notionalUsd: number;
+  /** Margin tied up across open positions. Always notional/leverage or less. */
+  marginUsd: number;
+  /** Total profit against margin posted. The leveraged return, or null when flat. */
+  totalPct: number | null;
+  openCount: number;
+  longCount: number;
+  shortCount: number;
+  fillCount: number;
+  unpriced: string[];
+};
+
+type Perp = {
+  qty: number;
+  entry: number;
+  realized: number;
+  leverage: number;
+  fills: number;
+  lastFillAt: string;
+};
+
+/** Below this, a residual perp position is float noise and reads as flat. */
+const DUST_PERP = 1e-10;
+
+/**
+ * Fold futures fills into signed positions and profit.
+ *
+ * Handles the case spot cannot: a fill larger than the open position in the
+ * opposite direction CLOSES it and opens a new one the other way, in one order.
+ * The close realises at the old entry, the remainder starts at the fill price.
+ * Getting this wrong shows up as a position that quietly keeps a stale entry
+ * across a flip and reports profit measured from a price it never traded at.
+ */
+export function computeFuturesPnl(
+  fills: Fill[],
+  marks: Record<string, string> = {},
+): FuturesPnlSummary {
+  const ordered = fills
+    .filter((f) => venueOf(f) === "futures")
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  const pots = new Map<string, Perp>();
+
+  for (const fill of ordered) {
+    if (!Number.isFinite(fill.qty) || fill.qty <= 0) continue;
+    if (!Number.isFinite(fill.price) || fill.price <= 0) continue;
+
+    const pot: Perp = pots.get(fill.symbol) ?? {
+      qty: 0,
+      entry: 0,
+      realized: 0,
+      leverage: fill.leverage ?? 1,
+      fills: 0,
+      lastFillAt: fill.createdAt,
+    };
+    pot.fills += 1;
+    pot.lastFillAt = fill.createdAt;
+
+    const delta = fill.side === "BUY" ? fill.qty : -fill.qty;
+    const adding = pot.qty === 0 || Math.sign(pot.qty) === Math.sign(delta);
+
+    if (adding) {
+      // Volume-weighted entry. The leverage of the position becomes the
+      // leverage of the fills currently holding it open.
+      const total = Math.abs(pot.qty) + Math.abs(delta);
+      pot.entry =
+        total > 0 ? (Math.abs(pot.qty) * pot.entry + Math.abs(delta) * fill.price) / total : fill.price;
+      pot.qty += delta;
+      if (fill.leverage) pot.leverage = fill.leverage;
+    } else {
+      const closeQty = Math.min(Math.abs(pot.qty), Math.abs(delta));
+      // Sign of the position being closed decides which way profit runs: a
+      // short books profit when the exit price is BELOW the entry.
+      pot.realized += closeQty * (fill.price - pot.entry) * Math.sign(pot.qty);
+
+      const flipped = Math.abs(delta) > Math.abs(pot.qty);
+      pot.qty += delta;
+
+      if (Math.abs(pot.qty) < DUST_PERP) {
+        pot.qty = 0;
+        pot.entry = 0;
+      } else if (flipped) {
+        // The remainder is a brand new position in the other direction, and it
+        // was opened at this fill's price, not at the old entry.
+        pot.entry = fill.price;
+        if (fill.leverage) pot.leverage = fill.leverage;
+      }
+    }
+
+    pots.set(fill.symbol, pot);
+  }
+
+  const positions: PerpPosition[] = [];
+  const unpriced: string[] = [];
+
+  let realizedUsd = 0;
+  let unrealizedUsd = 0;
+  let notionalUsd = 0;
+  let marginUsd = 0;
+
+  for (const [symbol, pot] of pots) {
+    const rawMark = Number(marks[symbol]);
+    const markPrice = Number.isFinite(rawMark) && rawMark > 0 ? rawMark : null;
+    const open = pot.qty !== 0;
+    const size = Math.abs(pot.qty);
+    const notional = size * pot.entry;
+    const leverage = Math.max(1, pot.leverage);
+    const margin = notional / leverage;
+
+    const unrealized =
+      open && markPrice !== null ? size * (markPrice - pot.entry) * Math.sign(pot.qty) : null;
+
+    if (open && markPrice === null) unpriced.push(symbol);
+
+    realizedUsd += pot.realized;
+    if (open) {
+      notionalUsd += notional;
+      marginUsd += margin;
+    }
+    if (unrealized !== null) unrealizedUsd += unrealized;
+
+    positions.push({
+      symbol,
+      qty: pot.qty,
+      direction: pot.qty > 0 ? "long" : pot.qty < 0 ? "short" : "flat",
+      entryPrice: pot.entry,
+      notionalUsd: open ? notional : 0,
+      marginUsd: open ? margin : 0,
+      leverage,
+      markPrice,
+      unrealizedUsd: unrealized,
+      unrealizedPct: unrealized !== null && notional > 0 ? unrealized / notional : null,
+      returnOnMarginPct: unrealized !== null && margin > 0 ? unrealized / margin : null,
+      realizedUsd: pot.realized,
+      fills: pot.fills,
+      lastFillAt: pot.lastFillAt,
+    });
+  }
+
+  // Open first, then by exposure. Same ordering rule as spot: the row that is
+  // still moving and carries the most risk sits nearest the top.
+  positions.sort((a, b) => {
+    if ((a.qty !== 0) !== (b.qty !== 0)) return a.qty !== 0 ? -1 : 1;
+    return b.notionalUsd - a.notionalUsd;
+  });
+
+  const totalUsd = realizedUsd + unrealizedUsd;
+
+  return {
+    positions,
+    realizedUsd,
+    unrealizedUsd,
+    totalUsd,
+    notionalUsd,
+    marginUsd,
+    totalPct: marginUsd > 0 ? totalUsd / marginUsd : null,
+    openCount: positions.filter((p) => p.qty !== 0).length,
+    longCount: positions.filter((p) => p.qty > 0).length,
+    shortCount: positions.filter((p) => p.qty < 0).length,
+    fillCount: ordered.length,
+    unpriced,
+  };
+}
+
+export type VenuePnl = {
+  spot: PnlSummary;
+  futures: FuturesPnlSummary;
+  /**
+   * The two added up, and the ONLY place they are.
+   *
+   * Both venues settle in demo USDT, so unlike trading profit and x402 revenue
+   * these genuinely are the same unit and a total is meaningful. The console
+   * still leads with the split, because "up $4 on spot, down $3 on a short" and
+   * "up $1" are different stories about the same agent, and the second one
+   * hides which half of the strategy is working.
+   */
+  totalUsd: number;
+  fillCount: number;
+};
+
+/** Both venues, folded from one ledger. */
+export function computeVenuePnl(
+  fills: Fill[],
+  marks: Record<string, string> = {},
+): VenuePnl {
+  const spot = computePnl(fills, marks);
+  const futures = computeFuturesPnl(fills, marks);
+  return {
+    spot,
+    futures,
+    totalUsd: spot.totalUsd + futures.totalUsd,
+    fillCount: spot.fillCount + futures.fillCount,
   };
 }

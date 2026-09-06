@@ -63,7 +63,7 @@ async function fire(): Promise<void> {
     const what = body.order
       ? `${body.order.side} ${body.order.symbol} ${body.order.status}`
       : (body.decision?.decision ?? body.skipped ?? "no verdict");
-    console.log(`[heartbeat] beat in ${body.tookMs}ms — ${what}`);
+    console.log(`[heartbeat] beat in ${body.tookMs}ms, ${what}`);
   } catch (err) {
     // The interval must outlive any single failure — a bad news hour, a model
     // outage, or the server not being ready for the very first beat.
@@ -89,7 +89,7 @@ export function register(): void {
   }, FIRST_BEAT_MS).unref?.();
 
   console.log(
-    `[heartbeat] armed — first beat in ${Math.round(FIRST_BEAT_MS / 1000)}s, ` +
+    `[heartbeat] armed, first beat in ${Math.round(FIRST_BEAT_MS / 1000)}s, ` +
       `then every ${Math.round(INTERVAL_MS / 1000)}s`,
   );
 }

@@ -37,6 +37,7 @@
  * the record; `MAX_RETAINED` only decides how much of it this process holds.
  */
 import type { Action, ActionKind, Decision, Fill, OrderResult, Purchase } from "@/lib/types";
+import { venueOf } from "@/lib/types";
 import { limitsFromEnv, spentToday } from "@/lib/budget";
 import { appendRow, initStore, loadRows } from "@/lib/store";
 
@@ -199,6 +200,12 @@ export function recordFill(args: { actionId: string; order: OrderResult }): Fill
   if (!Number.isFinite(qty) || qty <= 0) return null;
   if (!Number.isFinite(quoteUsd) || quoteUsd <= 0) return null;
 
+  // Venue, leverage and margin are copied from the order rather than looked up
+  // later, so a fill is a complete record of what actually happened even if the
+  // leverage setting changes afterwards. See src/lib/types.ts.
+  const venue = venueOf(order);
+  const leverage = venue === "futures" ? Math.max(1, order.leverage ?? 1) : 1;
+
   const row: Fill = {
     id: nextId("fil"),
     actionId: args.actionId,
@@ -209,6 +216,14 @@ export function recordFill(args: { actionId: string; order: OrderResult }): Fill
     quoteUsd,
     price: quoteUsd / qty,
     live: order.live,
+    venue,
+    ...(venue === "futures"
+      ? {
+          leverage,
+          marginUsd: quoteUsd / leverage,
+          reduceOnly: order.reduceOnly ?? false,
+        }
+      : {}),
     createdAt: new Date(order.transactTime || Date.now()).toISOString(),
   };
   fillRows = [row, ...fillRows];
@@ -292,6 +307,9 @@ export type LedgerSummary = {
   blockedCount: number;
   /** Executions on record. Positions are derived from these, not from actions. */
   fillCount: number;
+  /** Fills per venue, so the console can label an empty futures panel honestly. */
+  spotFillCount: number;
+  futuresFillCount: number;
   earnedTodayUsd: number;
   spentTodayUsd: number;
   remainingTodayUsd: number;
@@ -309,6 +327,8 @@ export function ledgerSummary(now = Date.now()): LedgerSummary {
     orderCount: actionRows.filter((a) => a.orderId !== null).length,
     blockedCount: actionRows.filter((a) => a.decision !== "ALLOW").length,
     fillCount: fillRows.length,
+    spotFillCount: fillRows.filter((f) => venueOf(f) === "spot").length,
+    futuresFillCount: fillRows.filter((f) => venueOf(f) === "futures").length,
     earnedTodayUsd: earnedTodayUsd(now),
     spentTodayUsd: spent,
     remainingTodayUsd: Math.max(0, limits.dailyTradeUsd - spent),

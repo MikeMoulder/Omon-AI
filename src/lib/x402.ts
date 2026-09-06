@@ -67,7 +67,7 @@ async function build(): Promise<x402ResourceServer> {
     const facilitator = new B402FacilitatorClient({
       client: transport,
       onSettlementUnknown: (event: unknown) => {
-        console.error("[b402] settlement UNKNOWN — reconcile before serving again", event);
+        console.error("[b402] settlement UNKNOWN, reconcile before serving again", event);
       },
     });
     // @bnb-chain/b402@0.2.1 targets @x402/core ^2.19; core 2.25 widened

@@ -4,7 +4,7 @@
  * No network, no keys, no model. Runs in milliseconds.
  */
 import assert from "node:assert/strict";
-import { computePnl } from "@/lib/pnl";
+import { computeFuturesPnl, computePnl, computeVenuePnl } from "@/lib/pnl";
 import type { Fill } from "@/lib/types";
 
 let seq = 0;
@@ -30,6 +30,35 @@ function fill(args: {
     quoteUsd: args.quoteUsd,
     price: args.quoteUsd / args.qty,
     live: true,
+    createdAt: new Date(base - args.agoHours * HOUR).toISOString(),
+  };
+}
+
+/** The same, on the futures venue. `leverage` decides the margin recorded. */
+function perp(args: {
+  symbol: string;
+  side: "BUY" | "SELL";
+  qty: number;
+  price: number;
+  agoHours: number;
+  leverage?: number;
+}): Fill {
+  const leverage = args.leverage ?? 1;
+  const quoteUsd = args.qty * args.price;
+  seq += 1;
+  return {
+    id: `fil_${seq}`,
+    actionId: `act_${seq}`,
+    orderId: `ord_${seq}`,
+    symbol: args.symbol,
+    side: args.side,
+    qty: args.qty,
+    quoteUsd,
+    price: args.price,
+    live: true,
+    venue: "futures",
+    leverage,
+    marginUsd: quoteUsd / leverage,
     createdAt: new Date(base - args.agoHours * HOUR).toISOString(),
   };
 }
@@ -200,6 +229,147 @@ check("open positions sort above closed ones", () => {
   assert.equal(p.positions[0].symbol, "BTCUSDT");
   assert.equal(p.positions[1].symbol, "BNBUSDT");
   near(p.totalUsd, 2, "1 realised on BNB plus 1 open on BTC");
+});
+
+console.log("\ncomputeFuturesPnl");
+
+check("a short profits when the mark falls", () => {
+  // The test the whole venue exists for. Spot average-cost arithmetic reports
+  // this as a loss, which is why futures is not a flag on computePnl().
+  const p = computeFuturesPnl([perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 1 })], {
+    BTCUSDT: "79000",
+  });
+  assert.equal(p.positions[0].direction, "short");
+  near(p.unrealizedUsd, 10, "short is up $10 when BTC falls $1000 on 0.01");
+  assert.equal(p.shortCount, 1);
+});
+
+check("a short loses when the mark rises", () => {
+  const p = computeFuturesPnl([perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 1 })], {
+    BTCUSDT: "81000",
+  });
+  near(p.unrealizedUsd, -10, "short is down $10 when BTC rises $1000 on 0.01");
+});
+
+check("a long still profits when the mark rises", () => {
+  const p = computeFuturesPnl([perp({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, price: 80_000, agoHours: 1 })], {
+    BTCUSDT: "81000",
+  });
+  assert.equal(p.positions[0].direction, "long");
+  near(p.unrealizedUsd, 10, "long is up $10");
+});
+
+check("margin is notional over leverage", () => {
+  const p = computeFuturesPnl(
+    [perp({ symbol: "BNBUSDT", side: "BUY", qty: 0.1, price: 800, agoHours: 1, leverage: 4 })],
+    { BNBUSDT: "800" },
+  );
+  near(p.notionalUsd, 80, "notional is qty * entry");
+  near(p.marginUsd, 20, "margin is notional / 4");
+  assert.equal(p.positions[0].leverage, 4);
+});
+
+check("return on margin is the leveraged return, and both are reported", () => {
+  const p = computeFuturesPnl(
+    [perp({ symbol: "BNBUSDT", side: "BUY", qty: 0.1, price: 800, agoHours: 1, leverage: 4 })],
+    { BNBUSDT: "808" },
+  );
+  const row = p.positions[0];
+  near(row.unrealizedUsd ?? 0, 0.8, "up $0.80 on $80 of notional");
+  near((row.unrealizedPct ?? 0) * 100, 1, "1% on notional");
+  near((row.returnOnMarginPct ?? 0) * 100, 4, "4% on margin at 4x");
+});
+
+check("closing a short books the profit and leaves nothing open", () => {
+  const p = computeFuturesPnl(
+    [
+      perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 2 }),
+      perp({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, price: 79_000, agoHours: 1 }),
+    ],
+    { BTCUSDT: "79000" },
+  );
+  near(p.realizedUsd, 10, "sold at 80k, bought back at 79k");
+  assert.equal(p.openCount, 0);
+  near(p.unrealizedUsd, 0, "nothing left open");
+});
+
+check("a sell larger than the long flips the position and re-bases the entry", () => {
+  // Long 0.01 at 80k, then sell 0.03 at 81k: closes the long for +$10 and opens
+  // a 0.02 short AT 81k, not at the old 80k entry.
+  const p = computeFuturesPnl(
+    [
+      perp({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, price: 80_000, agoHours: 2 }),
+      perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.03, price: 81_000, agoHours: 1 }),
+    ],
+    { BTCUSDT: "81000" },
+  );
+  const row = p.positions[0];
+  assert.equal(row.direction, "short");
+  near(row.qty, -0.02, "0.02 short remains");
+  near(row.entryPrice, 81_000, "the new short started at the fill price");
+  near(p.realizedUsd, 10, "the long booked +$10");
+  near(p.unrealizedUsd, 0, "the new short is flat at its own entry");
+});
+
+check("adding to a short averages the entry", () => {
+  const p = computeFuturesPnl(
+    [
+      perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 2 }),
+      perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 82_000, agoHours: 1 }),
+    ],
+    { BTCUSDT: "81000" },
+  );
+  near(p.positions[0].entryPrice, 81_000, "average of 80k and 82k");
+  near(p.unrealizedUsd, 0, "flat at the average entry");
+});
+
+check("an unpriced perp is excluded, never counted as zero", () => {
+  const p = computeFuturesPnl([perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 1 })], {});
+  assert.equal(p.positions[0].unrealizedUsd, null);
+  assert.deepEqual(p.unpriced, ["BTCUSDT"]);
+  near(p.unrealizedUsd, 0, "not in the total");
+});
+
+console.log("\nvenue separation");
+
+check("futures fills never enter the spot P&L", () => {
+  const rows = [
+    fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 800, agoHours: 2 }),
+    perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 1 }),
+  ];
+  const spot = computePnl(rows, { BTCUSDT: "79000" });
+  // The spot side sees one BUY and nothing else. Without the venue filter the
+  // perp SELL would close it and book a fabricated realised profit.
+  assert.equal(spot.fillCount, 1);
+  assert.equal(spot.openCount, 1);
+  near(spot.realizedUsd, 0, "no spot sell happened");
+});
+
+check("spot fills never enter the futures P&L", () => {
+  const rows = [fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 800, agoHours: 2 })];
+  const fut = computeFuturesPnl(rows, { BTCUSDT: "79000" });
+  assert.equal(fut.fillCount, 0);
+  assert.equal(fut.positions.length, 0);
+});
+
+check("computeVenuePnl keeps the halves apart and totals them once", () => {
+  const rows = [
+    fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 800, agoHours: 2 }),
+    perp({ symbol: "BTCUSDT", side: "SELL", qty: 0.01, price: 80_000, agoHours: 1 }),
+  ];
+  const v = computeVenuePnl(rows, { BTCUSDT: "79000" });
+  near(v.spot.totalUsd, -10, "the spot long is down $10");
+  near(v.futures.totalUsd, 10, "the perp short is up $10");
+  near(v.totalUsd, 0, "hedged flat overall, and the split says why");
+  assert.equal(v.fillCount, 2);
+});
+
+check("pre-futures rows with no venue read as spot", () => {
+  const legacy = fill({ symbol: "BNBUSDT", side: "BUY", qty: 0.026, quoteUsd: 20, agoHours: 1 });
+  delete (legacy as { venue?: string }).venue;
+  const v = computeVenuePnl([legacy], { BNBUSDT: "800" });
+  assert.equal(v.spot.fillCount, 1);
+  assert.equal(v.futures.fillCount, 0);
 });
 
 console.log(`\n${passed} passed\n`);

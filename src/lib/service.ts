@@ -36,14 +36,14 @@ export const SERVICE_TAGS = [
 
 /** Shape of one intel row, described for a buyer that has never seen it. */
 const INTEL_FIELDS = {
-  id: "string — stable row id",
-  headline: "string — the source headline",
-  sourceUrl: "string — link to the original article",
-  summary: "string — two sentences on the mechanism, not a restatement",
-  assets: "string[] — ticker symbols, most affected first, max 4",
+  id: "string: stable row id",
+  headline: "string: the source headline",
+  sourceUrl: "string: link to the original article",
+  summary: "string: two sentences on the mechanism, not a restatement",
+  assets: "string[]: ticker symbols, most affected first, max 4",
   direction: '"bullish" | "bearish" | "neutral"',
-  confidence: "number — 0..1",
-  createdAt: "string — ISO 8601",
+  confidence: "number: 0..1",
+  createdAt: "string: ISO 8601",
 } as const;
 
 /**
@@ -117,15 +117,15 @@ export const ENDPOINTS: EndpointDoc[] = [
     description:
       "Latest structured market intelligence derived from crypto news headlines. Served from a cache refreshed every 5 minutes; each response says how old it is.",
     query: {
-      limit: "1-10, default 3 — how many intel rows to return",
+      limit: "1-10, default 3: how many intel rows to return",
     },
     poweredBy: ["rss:cointelegraph", "rss:coindesk", "llm:gemini"],
     returns: {
       intel: [INTEL_FIELDS],
-      fresh: "boolean — false once the cache is past its 5 minute TTL",
-      ageSeconds: "number | null — age of the cached rows",
+      fresh: "boolean: false once the cache is past its 5 minute TTL",
+      ageSeconds: "number | null: age of the cached rows",
       source: '"cache" | "fixture"',
-      servedAt: "string — ISO 8601",
+      servedAt: "string: ISO 8601",
     },
   },
   {
@@ -135,7 +135,7 @@ export const ENDPOINTS: EndpointDoc[] = [
     description:
       "Trade signals derived from the same intelligence plus live Binance market data, each carrying a conviction score for how far the news and the chart agreed. Served from a cache; each response says how old it is.",
     query: {
-      limit: "1-10, default 3 — how many signals to return",
+      limit: "1-10, default 3: how many signals to return",
     },
     // Named per rail rather than per vendor: reads try Binance MCP first and
     // fall through to the Skill Hub CLI, and /api/agent-os reports which one
@@ -150,19 +150,19 @@ export const ENDPOINTS: EndpointDoc[] = [
     returns: {
       signals: [
         {
-          symbol: "string — e.g. BNBUSDT",
+          symbol: "string: e.g. BNBUSDT",
           side: '"BUY" | "SELL"',
           sizeUsd: "number",
-          thesis: "string — one sentence tying the trade to the headline",
-          intelId: "string — the intel row this came from",
-          convictionScore: "number | null — -1..1, how far news and chart agreed",
+          thesis: "string: one sentence tying the trade to the headline",
+          intelId: "string: the intel row this came from",
+          convictionScore: "number | null: -1..1, how far news and chart agreed",
           convictionLabel: '"high" | "medium" | "low" | null',
         },
       ],
-      fresh: "boolean — false once the cache is past its TTL",
-      ageSeconds: "number | null — age of the cached signals",
+      fresh: "boolean: false once the cache is past its TTL",
+      ageSeconds: "number | null: age of the cached signals",
       source: '"cache" | "empty"',
-      servedAt: "string — ISO 8601",
+      servedAt: "string: ISO 8601",
     },
   },
 ];
@@ -202,7 +202,7 @@ export function agentOsUsage(
         detail: mcp.reason,
       },
       {
-        surface: "Binance Skill Hub — binance-cli",
+        surface: "Binance Skill Hub: binance-cli",
         endpoint: "https://github.com/binance/binance-cli",
         use: "Market reads when MCP is unavailable: prices and the OHLCV candles the strategy runs on. Needs no credentials, which is why this rail is the one that actually serves.",
         commands: ["spot ticker-price", "spot klines"],
@@ -210,7 +210,7 @@ export function agentOsUsage(
         detail: cli.reason,
       },
       {
-        surface: "Binance Exchange API — Spot Demo Mode",
+        surface: "Binance Exchange API: Spot Demo Mode",
         endpoint: "https://demo-api.binance.com",
         use: "Order execution. A real matching engine with demo funds.",
         status: "in use",
@@ -240,7 +240,7 @@ export function serviceManifest(args: {
     // Said plainly and first. Both money rails here are non-production, and a
     // buyer discovering this service deserves to know before it pays.
     disclosure:
-      "Payments settle in test USDC on Base Sepolia via the public x402 facilitator. Not mainnet, and not Binance's B402 rail — B402 merchant onboarding requires a business entity account.",
+      "Payments settle in test USDC on Base Sepolia via the public x402 facilitator. Not mainnet, and not Binance's B402 rail: B402 merchant onboarding requires a business entity account.",
     payment: {
       protocol: "x402",
       scheme: "exact",

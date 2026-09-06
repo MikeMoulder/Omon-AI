@@ -82,7 +82,7 @@ const skippedCounts: Record<string, number> = {};
 function degrade(err: unknown): false {
   if (degradedReason === null) {
     degradedReason = err instanceof Error ? err.message : String(err);
-    console.error(`[store] persistence is OFF — ${degradedReason}`);
+    console.error(`[store] persistence is OFF: ${degradedReason}`);
   }
   return false;
 }

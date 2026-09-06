@@ -18,13 +18,33 @@
  * Recording the verdict is not bookkeeping, it is the product. A refusal that
  * leaves no trace is indistinguishable from having no budget layer at all, so
  * BLOCK is written down with the same weight as a fill.
+ *
+ * ## Venue routing
+ *
+ * A signal now carries a venue, and this is the only place that acts on it.
+ * Two facts about the position have to be established BEFORE the budget layer
+ * runs, because both change the verdict:
+ *
+ *   - **what Omon holds on spot**, so a SELL for more than it owns is refused
+ *     here with a sentence rather than bouncing off Binance with -2010;
+ *   - **whether a futures order closes or opens**, because a close is exempt
+ *     from the daily cap and must be sent `reduceOnly` so an overshoot shrinks
+ *     the position instead of silently flipping it into the opposite trade.
+ *
+ * Both are derived from this ledger's own fills rather than asked of the
+ * exchange, so the number the budget layer checks is the same number the
+ * console shows. `reduceOnly` is decided here and never taken from the model:
+ * whether an order closes a position is a fact about the position, not an
+ * opinion the Signal Agent gets to have.
  */
-import type { Decision, OrderResult, Signal } from "@/lib/types";
+import type { Decision, OrderResult, Signal, Venue } from "@/lib/types";
 import { evaluateTrade } from "@/lib/budget";
-import { placeOrder } from "@/lib/exchange";
+import { getPrices, placeOrder } from "@/lib/exchange";
+import { futuresMinNotional, placeFuturesOrder } from "@/lib/futures";
+import { computeFuturesPnl, computePnl } from "@/lib/pnl";
 import { refreshIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { refreshSignals, signalCacheStatus } from "@/lib/signal-cache";
-import { hasTradedSignal, recordAction, recordFill, spentTodayUsd } from "@/lib/ledger";
+import { fills, hasTradedSignal, recordAction, recordFill, spentTodayUsd } from "@/lib/ledger";
 import { readDoc, writeDoc } from "@/lib/store";
 
 /**
@@ -96,6 +116,53 @@ export function tickRunning(): boolean {
   return inflight !== null;
 }
 
+/**
+ * What Omon's own fills say it currently has in one symbol, priced live.
+ *
+ * Derived from the ledger rather than read off the exchange, deliberately. The
+ * Spot Demo account was pre-funded before Omon ever traded, so the exchange
+ * balance includes coins this agent did not buy and has no cost basis for.
+ * Selling those would book profit measured from a price nobody paid. Asking our
+ * own fills keeps the sell guard, the P&L and the console describing the same
+ * position.
+ *
+ * A price that cannot be read returns `holdingUsd: undefined`, which the budget
+ * layer treats as "unknown" and refuses to sell against. That is the right way
+ * round: an unpriceable position is one we cannot size a sell for.
+ */
+async function positionFor(
+  symbol: string,
+  venue: Venue,
+): Promise<{ holdingUsd: number | undefined; perpQty: number; minNotionalUsd: number | undefined }> {
+  let marks: Record<string, string> = {};
+  try {
+    marks = await getPrices([symbol]);
+  } catch (err) {
+    console.warn(`[tick] could not price ${symbol}:`, err);
+  }
+
+  const rows = fills();
+
+  if (venue === "futures") {
+    const perp = computeFuturesPnl(rows, marks).positions.find((p) => p.symbol === symbol);
+    // Futures minimums are per symbol and some are larger than the per-trade
+    // cap. Resolved here so the budget layer can refuse in words rather than
+    // letting the order bounce off Binance. See futuresMinNotional().
+    const mark = Number(marks[symbol]);
+    let minNotionalUsd: number | undefined;
+    try {
+      minNotionalUsd = await futuresMinNotional(symbol, mark);
+    } catch {
+      // Unknown floor sizes optimistically. A refused order is visible; an
+      // order suppressed by a guess is not.
+    }
+    return { holdingUsd: perp?.notionalUsd, perpQty: perp?.qty ?? 0, minNotionalUsd };
+  }
+
+  const spot = computePnl(rows, marks).positions.find((p) => p.symbol === symbol);
+  return { holdingUsd: spot?.marketValueUsd ?? undefined, perpQty: 0, minNotionalUsd: undefined };
+}
+
 async function beat(opts: {
   force: boolean;
   sizeUsd?: number;
@@ -151,7 +218,7 @@ async function beat(opts: {
   if (opts.sizeUsd === undefined && hasTradedSignal(signal.id)) {
     return finish({
       ok: true,
-      skipped: "signal already traded — waiting for new intel",
+      skipped: "signal already traded, waiting for new intel",
       intel: intelRow,
       signal,
       decision: null,
@@ -165,19 +232,43 @@ async function beat(opts: {
       ? opts.sizeUsd
       : signal.sizeUsd;
 
+  const venue: Venue = signal.venue === "futures" ? "futures" : "spot";
+  const leverage = venue === "futures" ? Math.max(1, Math.floor(signal.leverage ?? 1)) : 1;
+
+  // What this ledger says Omon holds, priced at the live mark. Both branches
+  // need a price, and the one call serves both. A price that cannot be read
+  // leaves `holdingUsd` undefined, and the budget layer refuses the sell rather
+  // than guessing at a position it could not value.
+  const position = await positionFor(signal.symbol, venue);
+
+  // A futures order that runs against an open position is a close, and the
+  // exchange must be told so. Derived, never taken from the model.
+  const reduceOnly =
+    venue === "futures" &&
+    position.perpQty !== 0 &&
+    Math.sign(position.perpQty) !== (signal.side === "BUY" ? 1 : -1);
+
   const decision = evaluateTrade({
     symbol: signal.symbol,
     sizeUsd,
     spentTodayUsd: spentTodayUsd(),
+    venue,
+    side: signal.side,
+    leverage,
+    reduceOnly,
+    holdingUsd: position.holdingUsd,
+    minNotionalUsd: position.minNotionalUsd,
   });
 
   const payload = {
     symbol: signal.symbol,
     side: signal.side,
     sizeUsd,
+    venue,
     signalId: signal.id,
     intelId: signal.intelId,
     convictionLabel: signal.convictionLabel ?? null,
+    ...(venue === "futures" ? { leverage, reduceOnly, marginUsd: sizeUsd / leverage } : {}),
     ...(sizeUsd === signal.sizeUsd ? {} : { proposedSizeUsd: signal.sizeUsd, overridden: true }),
   };
 
@@ -204,7 +295,16 @@ async function beat(opts: {
   let orderError: string | null = null;
 
   try {
-    order = await placeOrder({ symbol: signal.symbol, side: signal.side, sizeUsd });
+    order =
+      venue === "futures"
+        ? await placeFuturesOrder({
+            symbol: signal.symbol,
+            side: signal.side,
+            sizeUsd,
+            leverage,
+            reduceOnly,
+          })
+        : await placeOrder({ symbol: signal.symbol, side: signal.side, sizeUsd });
   } catch (err) {
     orderError = err instanceof Error ? err.message : String(err);
   }

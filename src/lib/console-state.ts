@@ -22,12 +22,13 @@ import { exchangeMode, getBalances, getPrices } from "@/lib/exchange";
 import { getIntel, intelCacheStatus, type CacheStatus } from "@/lib/intel-cache";
 import { getSignals, signalCacheStatus, type SignalCacheStatus } from "@/lib/signal-cache";
 import { actions, fills, ledgerSummary, purchases, type LedgerSummary } from "@/lib/ledger";
-import { computePnl, type PnlSummary } from "@/lib/pnl";
+import { computeVenuePnl, type VenuePnl } from "@/lib/pnl";
 import { storeStatus, type StoreStatus } from "@/lib/store";
 import { llmMode } from "@/lib/llm";
 import { mcpMode, mcpUsage } from "@/lib/mcp";
 import { newsMode } from "@/lib/news";
 import { cliMode } from "@/lib/skillhub";
+import { MAX_LEVERAGE, futuresMode } from "@/lib/futures";
 import { SERVICE_NAME, SERVICE_DESCRIPTION } from "@/lib/service";
 import { schedulerStatus, type SchedulerStatus } from "@/lib/scheduler";
 import { lastTick, tickCount, tickRunning, type TickResult } from "@/lib/tick";
@@ -44,6 +45,7 @@ export type ConsoleSnapshot = {
     signalAgent: Mode;
     news: Mode;
     exchange: Mode;
+    futures: Mode;
     mcp: Mode;
     skillHub: Mode;
   };
@@ -58,8 +60,14 @@ export type ConsoleSnapshot = {
    * Derived here rather than stored, so it cannot disagree with the fills — and
    * marked with the prices in this very snapshot, so the P&L on screen is
    * arithmetic the viewer can check against the marks on screen.
+   *
+   * Split by venue. The console leads with the split rather than the total
+   * because "up on spot, down on a short" and "flat" are different stories
+   * about the same agent, and only one of them says which half is working.
    */
-  pnl: PnlSummary;
+  pnl: VenuePnl;
+  /** Leverage ceiling, on screen next to the futures figures. */
+  maxLeverage: number;
   limits: BudgetLimits;
   /** Spot Demo Mode balances — the account orders actually hit. Null while unreadable. */
   balances: Record<string, string> | null;
@@ -169,6 +177,7 @@ export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
       signalAgent: llmMode("signal"),
       news: newsMode(),
       exchange: exchangeMode(),
+      futures: futuresMode(),
       mcp: mcpMode(),
       skillHub: cliMode(),
     },
@@ -177,7 +186,8 @@ export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
     signals: { rows: signals.signals, status: signalCacheStatus(), source: signals.source },
     money: { in: purchases(12), out: actions(12) },
     ledger: ledgerSummary(),
-    pnl: computePnl(fills(), priceRows),
+    pnl: computeVenuePnl(fills(), priceRows),
+    maxLeverage: MAX_LEVERAGE,
     limits: limitsFromEnv(),
     balances: balanceRows,
     balancesError: balanceError,

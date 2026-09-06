@@ -8,11 +8,12 @@
  * Every export falls back to fixtures when DEMO_MODE=fixture or no key is set,
  * so the rest of the app never needs to know whether a model was reachable.
  */
-import type { Intel, Signal, Direction } from "@/lib/types";
+import type { Intel, Signal, Direction, Venue } from "@/lib/types";
 import type { Conviction, TechnicalSnapshot } from "@/lib/strategy";
 import { latestIntel } from "@/lib/fixtures";
 import { limitsFromEnv } from "@/lib/budget";
 import { MIN_NOTIONAL_USD } from "@/lib/exchange";
+import { MAX_LEVERAGE, futuresEnabled } from "@/lib/futures";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -188,10 +189,17 @@ const SIGNAL_SCHEMA = {
   properties: {
     symbol: { type: "string" },
     side: { type: "string", enum: ["BUY", "SELL"] },
+    /**
+     * Which market. The field that lets a bearish reading become a trade: on
+     * spot a SELL can only shrink what is held, so before futures existed every
+     * bearish signal the engine produced had nowhere to go.
+     */
+    venue: { type: "string", enum: ["spot", "futures"] },
     sizeUsd: { type: "number" },
+    leverage: { type: "number" },
     thesis: { type: "string" },
   },
-  required: ["symbol", "side", "sizeUsd", "thesis"],
+  required: ["symbol", "side", "venue", "sizeUsd", "thesis"],
 };
 
 const clamp01 = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.5);
@@ -232,7 +240,7 @@ export async function intelFromHeadline(args: {
       "Read the headline and return machine-actionable intelligence for a trading agent.",
       "assets: ticker symbols only, e.g. BTC, ETH, BNB. At most 4, most affected first.",
       "direction: the likely near-term effect on those assets.",
-      "confidence: 0 to 1. Be honest — most headlines are weak signals.",
+      "confidence: 0 to 1. Be honest: most headlines are weak signals.",
       "summary: two sentences on the mechanism, not a restatement of the headline.",
       "",
       `HEADLINE: ${args.headline}`,
@@ -270,6 +278,18 @@ export async function signalFromIntel(args: {
   snapshots?: Record<string, TechnicalSnapshot | null>;
   /** Pre-blended news-vs-chart agreement for the leading symbol. */
   conviction?: Conviction;
+  /**
+   * Smallest tradable notional per symbol on futures, when known.
+   *
+   * Passed in rather than looked up because this file must not do network I/O.
+   * Without it the model proposes BTCUSDT shorts all day: BTC perps need $50 of
+   * notional on the demo host and the per-trade cap is $25, so every one of
+   * them is refused. Same reasoning as sizeCeiling below, and the same failure
+   * mode if it is left out: the model's proposals land outside a range it was
+   * never allowed to use, and the console fills with refusals that look like a
+   * broken agent instead of a misconfigured one.
+   */
+  futuresMinimums?: Record<string, number>;
 }): Promise<Signal> {
   const now = new Date().toISOString();
 
@@ -278,14 +298,20 @@ export async function signalFromIntel(args: {
     // path carries it too. Dropping it here would make the offline demo look
     // like the chart was never consulted.
     const c = args.conviction;
+    // A bearish fixture goes short on futures when futures is on, so the
+    // offline demo exercises both venues rather than only the long half.
+    const bearish = args.intel.direction === "bearish";
+    const useFutures = bearish && futuresEnabled();
     return {
       id: `signal_${Date.now().toString(36)}`,
       intelId: args.intel.id,
       symbol: "BNBUSDT",
-      side: args.intel.direction === "bearish" ? "SELL" : "BUY",
+      side: bearish ? "SELL" : "BUY",
+      venue: useFutures ? "futures" : "spot",
+      ...(useFutures ? { leverage: Math.min(2, MAX_LEVERAGE) } : {}),
       sizeUsd: 10,
       thesis: c
-        ? `Fixture signal — ${c.aligned ? "news and chart agree" : "news and chart disagree"} (${c.label} conviction) on: ${args.intel.headline}`
+        ? `Fixture signal, ${c.aligned ? "news and chart agree" : "news and chart disagree"} (${c.label} conviction) on: ${args.intel.headline}`
         : `Fixture signal derived from: ${args.intel.headline}`,
       createdAt: now,
       ...(c
@@ -331,19 +357,56 @@ export async function signalFromIntel(args: {
     Math.min(limits.maxTradeUsd, limits.requireApprovalAboveUsd),
   );
 
+  // Futures is opt-in, and the prompt has to match the build. Offering a venue
+  // that is switched off produces signals the budget layer refuses on arrival,
+  // which reads on the console as a broken agent rather than a disabled feature.
+  const perps = futuresEnabled();
+
+  // Symbols whose futures minimum actually fits under the per-trade cap. On the
+  // demo host that is BNB and ETH but not BTC, which wants $50.
+  const minimums = args.futuresMinimums ?? {};
+  const futuresTradable = perps
+    ? Object.keys(args.prices).filter((symbol) => (minimums[symbol] ?? 0) <= sizeCeiling)
+    : [];
+
   const out = await generate<{
     symbol: string;
     side: "BUY" | "SELL";
+    venue: "spot" | "futures";
     sizeUsd: number;
+    leverage?: number;
     thesis: string;
   }>(
     "signal",
     [
       "You are a trading signal engine. Combine the news intelligence, the live prices",
-      "and the technical picture below into exactly one SPOT trade idea.",
+      "and the technical picture below into exactly one trade idea.",
       `symbol: must be one of these exact trading pairs: ${Object.keys(args.prices).join(", ")}.`,
-      "side: BUY or SELL. This is a spot account with no borrowing, so prefer BUY;",
-      "  only choose SELL to reduce an asset the account already holds.",
+      perps
+        ? [
+            "venue: spot or futures.",
+            futuresTradable.length > 0
+              ? `  On futures you may ONLY use these, and sizeUsd must be at least the ` +
+                `number next to the one you pick: ` +
+                `${futuresTradable
+                  .map((symbol) => `${symbol} minimum $${Math.ceil(minimums[symbol] ?? sizeFloor)}`)
+                  .join(", ")}. ` +
+                `Every other pair needs more than the $${sizeCeiling} per-trade cap allows, ` +
+                `so a futures idea on one of those cannot be filled at all.`
+              : `  No pair currently clears both its futures minimum and the $${sizeCeiling} cap, so use spot.`,
+            "  spot BUY opens or adds to a long. Spot cannot short: a spot SELL is only",
+            "    valid to reduce a position this agent already holds, and is refused otherwise.",
+            "  futures BUY goes long, futures SELL goes SHORT. Use futures when the read is",
+            "    bearish and there is nothing to sell, because that is the only way to act on it.",
+            `leverage: whole number from 1 to ${MAX_LEVERAGE}. Use 1 unless news and chart agree.`,
+            "  Leverage multiplies losses exactly as it multiplies gains: size it on conviction,",
+            "  and never above 1 when the chart and the news disagree.",
+          ].join("\n")
+        : [
+            "venue: always spot. Futures is switched off on this build.",
+            "side: BUY or SELL. This is a spot account with no borrowing, so prefer BUY;",
+            "  only choose SELL to reduce an asset the account already holds.",
+          ].join("\n"),
       // The ceiling is READ FROM THE BUDGET, never written here as a literal.
       //
       // It used to say "between 5 and 50" while BUDGET_MAX_TRADE_USD was 25, and
@@ -356,7 +419,7 @@ export async function signalFromIntel(args: {
       // proposal and still treats sizeUsd as hostile. Telling the model the
       // limit only stops it wasting its proposals outside a range it was never
       // allowed to use.
-      `sizeUsd: between ${sizeFloor} and ${sizeCeiling}. Size on AGREEMENT, not on either signal alone —`,
+      `sizeUsd: between ${sizeFloor} and ${sizeCeiling}. Size on AGREEMENT, not on either signal alone,`,
       "  news and chart pointing the same way earns a larger size than loud news",
       "  against a hostile chart, which should be near the minimum.",
       "thesis: one sentence. Cite one concrete number from the technical picture",
@@ -368,7 +431,7 @@ export async function signalFromIntel(args: {
       `LIVE PRICES: ${priceLines}`,
       chartLines.length > 0
         ? ["TECHNICALS:", ...chartLines.map((l) => `  ${l}`)].join("\n")
-        : "TECHNICALS: unavailable — decide on the news alone and keep the size small.",
+        : "TECHNICALS: unavailable, decide on the news alone and keep the size small.",
       c
         ? `AGREEMENT: ${c.aligned ? "news and chart AGREE" : "news and chart DISAGREE"} (score ${c.score.toFixed(2)}, ${c.label} conviction)`
         : "",
@@ -378,12 +441,30 @@ export async function signalFromIntel(args: {
     SIGNAL_SCHEMA,
   );
 
+  // Futures only when this build has it. A model that ignores the instruction
+  // and asks for a venue that is off gets routed to spot rather than refused,
+  // because a smaller honest trade beats a beat that produced nothing.
+  const venue: Venue = perps && out.venue === "futures" ? "futures" : "spot";
+
   return {
     id: `signal_${Date.now().toString(36)}`,
     intelId: args.intel.id,
     symbol: out.symbol,
     side: out.side === "SELL" ? "SELL" : "BUY",
-    sizeUsd: Math.min(50, Math.max(5, out.sizeUsd)),
+    venue,
+    ...(venue === "futures"
+      ? {
+          leverage: Math.max(
+            1,
+            Math.min(MAX_LEVERAGE, Math.floor(Number(out.leverage) || 1)),
+          ),
+        }
+      : {}),
+    // Clamped to the range the prompt actually asked for. It used to be a
+    // hardcoded 5..50 while the budget ceiling was 25, so the model's strongest
+    // proposals were the ones guaranteed to be refused. Same reasoning as the
+    // comment on sizeCeiling above: one number, one place.
+    sizeUsd: Math.min(sizeCeiling, Math.max(sizeFloor, out.sizeUsd)),
     thesis: out.thesis,
     createdAt: now,
     ...(c

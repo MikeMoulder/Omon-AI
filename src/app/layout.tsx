@@ -12,10 +12,20 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+/**
+ * The tab title is a name, not a sentence. It sits next to a dozen other tabs
+ * on a judge's machine and has to be findable at a glance.
+ */
 export const metadata: Metadata = {
-  title: "Omon — agents that get paid",
+  title: "Omon",
   description:
-    "Two agents that turn crypto news into trade signals, sell both over x402, and trade Binance behind a budget layer written in plain code.",
+    "An AI agent that turns crypto news into trade signals, sells both over x402, and trades Binance spot and futures behind a budget layer written in plain code.",
+  openGraph: {
+    title: "Omon",
+    description:
+      "An AI agent that sells market intelligence to other agents, and trades on what it knows.",
+    type: "website",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -24,7 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full">{children}</body>
     </html>
   );
 }

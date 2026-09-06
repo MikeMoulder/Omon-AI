@@ -5,6 +5,27 @@
 
 export type Direction = "bullish" | "bearish" | "neutral";
 
+/**
+ * Which market an order goes to, and the single most load-bearing field added
+ * in the futures work.
+ *
+ * Spot and futures are not two flavours of the same trade. On spot, notional is
+ * risk and a position can only be long. On futures the position is signed, the
+ * margin posted is notional/leverage, and the P&L arithmetic is entirely
+ * different (see src/lib/pnl.ts). Every row that can reach an exchange carries
+ * this so nothing downstream has to guess which set of rules applies.
+ *
+ * Optional on the stored shapes rather than required, because `data/*.jsonl`
+ * already holds rows written before futures existed. `venueOf()` reads those as
+ * spot, which is what they were.
+ */
+export type Venue = "spot" | "futures";
+
+/** A row's venue, defaulting pre-futures rows to the venue they were written on. */
+export function venueOf(row: { venue?: Venue } | null | undefined): Venue {
+  return row?.venue === "futures" ? "futures" : "spot";
+}
+
 /** One OHLCV bar. Field names match the ren-ai engine so ported math is comparable. */
 export type Candle = {
   t: number; // open time, ms
@@ -40,7 +61,20 @@ export type Signal = {
   intelId: string;
   symbol: string; // e.g. "BTCUSDT"
   side: "BUY" | "SELL";
+  /**
+   * Position size in quote currency (USDT).
+   *
+   * On spot this is what gets spent. On futures it is NOTIONAL, not margin —
+   * the exposure the position carries. The budget layer checks this number on
+   * both venues so one cap means one thing, and margin is derived from it.
+   */
   sizeUsd: number;
+  /** Which market this idea is for. Absent on rows written before futures. */
+  venue?: Venue;
+  /** Futures only. 1 on spot, where there is no borrowing. */
+  leverage?: number;
+  /** Futures only. True when the order may only shrink an open position. */
+  reduceOnly?: boolean;
   thesis: string;
   createdAt: string; // ISO
   /**
@@ -94,6 +128,10 @@ export type OrderResult = {
   cummulativeQuoteQty: string; // quote asset actually spent/received
   transactTime: number;
   live: boolean; // false = fixture, and the console must say so
+  venue?: Venue;
+  /** Futures only. What leverage the position was actually opened at. */
+  leverage?: number;
+  reduceOnly?: boolean;
 };
 
 /** One env var read by every seam. Set on the deployed URL before recording. */
@@ -122,5 +160,17 @@ export type Fill = {
   price: number;
   /** false = fixture. The console must never show a fixture fill as a real one. */
   live: boolean;
+  /** Which market executed this. Absent on rows written before futures existed. */
+  venue?: Venue;
+  /** Futures only. Needed to say what this position actually tied up. */
+  leverage?: number;
+  /**
+   * Futures only. Margin posted for this fill, `quoteUsd / leverage`.
+   *
+   * Stored rather than derived so a later leverage change cannot retroactively
+   * rewrite what an old fill cost.
+   */
+  marginUsd?: number;
+  reduceOnly?: boolean;
   createdAt: string; // ISO
 };

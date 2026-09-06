@@ -208,11 +208,11 @@ export function conviction(args: {
     reasons.push(
       s.breakout
         ? `${s.breakout} breakout fired on the last ${s.interval} candle`
-        : `no breakout — ${Math.abs(s.toBreakoutHighPct).toFixed(1)}% below the ${STRATEGY_DEFAULTS.breakoutLen}-bar high`,
+        : `no breakout, ${Math.abs(s.toBreakoutHighPct).toFixed(1)}% below the ${STRATEGY_DEFAULTS.breakoutLen}-bar high`,
     );
     reasons.push(`volatility ${s.atrPct.toFixed(2)}% ATR, RSI ${s.rsi.toFixed(0)}`);
   } else {
-    reasons.push("chart 0.00 (no candle history — news only)");
+    reasons.push("chart 0.00 (no candle history, news only)");
   }
 
   reasons.push(aligned ? "news and chart AGREE" : "news and chart do not agree");

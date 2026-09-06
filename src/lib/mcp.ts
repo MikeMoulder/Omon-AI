@@ -221,10 +221,10 @@ export function mcpMode(): { mode: "live" | "off"; reason: string } {
   }
   const token = currentToken();
   if (!token) {
-    return { mode: "off", reason: "no MCP token — run: npx tsx scripts/mcp-auth.ts" };
+    return { mode: "off", reason: "no MCP token, run: npx tsx scripts/mcp-auth.ts" };
   }
   if (isExpiring(token) && !token.refresh_token) {
-    return { mode: "off", reason: "MCP token expired and no refresh token — re-run scripts/mcp-auth.ts" };
+    return { mode: "off", reason: "MCP token expired and no refresh token, re-run scripts/mcp-auth.ts" };
   }
   return { mode: "live", reason: `binance mcp @ ${new URL(URL_).host}` };
 }
@@ -259,7 +259,7 @@ async function rpc(
   opts: { notification?: boolean; isRetry?: boolean } = {},
 ): Promise<unknown> {
   let stored = currentToken();
-  if (!stored) throw new McpError("no MCP token — run: npx tsx scripts/mcp-auth.ts");
+  if (!stored) throw new McpError("no MCP token, run: npx tsx scripts/mcp-auth.ts");
 
   // Renew before the request rather than after a failure, when the server told
   // us when it expires. Cheaper than a failed call, and on a long-running VPS
@@ -313,7 +313,7 @@ async function rpc(
     }
 
     throw new McpError(
-      "binance mcp rejected the token (401). It has expired or been revoked — re-run: npx tsx scripts/mcp-auth.ts",
+      "binance mcp rejected the token (401). It has expired or been revoked, re-run: npx tsx scripts/mcp-auth.ts",
       401,
     );
   }

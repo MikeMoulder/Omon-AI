@@ -88,7 +88,7 @@ export function cliMode(): { mode: "live" | "off"; reason: string } {
   if (!bin) {
     return {
       mode: "off",
-      reason: `binance-cli not found (looked for "${CLI}") — install: github.com/binance/binance-cli`,
+      reason: `binance-cli not found (looked for "${CLI}"), install: github.com/binance/binance-cli`,
     };
   }
 

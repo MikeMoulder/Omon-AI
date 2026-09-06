@@ -22,6 +22,8 @@ import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { llmMode, signalFromIntel } from "@/lib/llm";
 import { conviction, technicalSnapshot, type TechnicalSnapshot } from "@/lib/strategy";
 import { getLatestIntel, refreshIntel } from "@/lib/intel-cache";
+import { MAX_LEVERAGE, futuresEnabled, futuresMinNotional } from "@/lib/futures";
+import type { Intel } from "@/lib/types";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -107,6 +109,102 @@ async function main() {
   const tooBig = evaluateTrade({ symbol: signal.symbol, sizeUsd: 500, spentTodayUsd: 0 });
   console.log(`  $500 -> ${tooBig.decision}: ${tooBig.reason}`);
   check("an oversized trade is refused by code, not by the model", tooBig.decision === "BLOCK");
+
+  console.log("\n--- 7. the bearish path ---");
+  //
+  // The reason futures exists. trendSignal() has always detected short
+  // breakouts and a spot account cannot trade one, so until this venue existed
+  // every bearish read the engine produced was computed and discarded.
+  //
+  // Step 4 above uses whatever the news actually says, which on a green day is
+  // bullish, so it never exercises this. A synthetic bearish intel row is the
+  // only way to check the bearish half without waiting for a crash.
+  if (!futuresEnabled()) {
+    console.log("  futures is off, so a bearish read still has nowhere to go. Skipped.");
+  } else {
+    const bearish: Intel = {
+      ...intel,
+      id: `${intel.id}_bear`,
+      headline: "Regulator opens enforcement action against a major exchange",
+      summary:
+        "A market-wide risk headline with no issuer-specific angle. Broad de-risking expected across majors.",
+      direction: "bearish",
+      confidence: 0.8,
+    };
+
+    const bearConviction = conviction({ intel: bearish, snapshot: snapshots[signal.symbol] ?? null });
+
+    // The same per-symbol floors src/lib/signal-cache.ts resolves before every
+    // real refresh. Passing them is not test scaffolding: without them the model
+    // reaches for BTCUSDT, whose $50 futures minimum no $25 trade can meet, and
+    // the whole venue looks broken when it is only misinformed.
+    const futuresMinimums: Record<string, number> = {};
+    for (const symbol of Object.keys(prices)) {
+      const px = Number(prices[symbol]);
+      if (Number.isFinite(px) && px > 0) {
+        futuresMinimums[symbol] = await futuresMinNotional(symbol, px);
+      }
+    }
+    console.log(
+      `  futures minimums: ${Object.entries(futuresMinimums)
+        .map(([sym, min]) => `${sym} $${min.toFixed(2)}`)
+        .join(", ")}`,
+    );
+
+    const short = await signalFromIntel({
+      intel: bearish,
+      prices,
+      snapshots,
+      conviction: bearConviction,
+      futuresMinimums,
+    });
+
+    console.log(
+      `  ${short.side} ${short.symbol} $${short.sizeUsd} on ${short.venue ?? "spot"}` +
+        `${short.venue === "futures" ? ` at ${short.leverage ?? 1}x` : ""}`,
+    );
+    console.log(`  thesis: ${short.thesis}`);
+
+    check(
+      "a bearish read produces a sell rather than a buy",
+      short.side === "SELL",
+      `${short.side} ${short.symbol}`,
+    );
+    check(
+      "and it routes to futures, where a short is actually possible",
+      short.venue === "futures",
+      String(short.venue),
+    );
+    check(
+      "leverage stays inside the ceiling",
+      (short.leverage ?? 1) >= 1 && (short.leverage ?? 1) <= MAX_LEVERAGE,
+      `${short.leverage ?? 1}x of ${MAX_LEVERAGE}x`,
+    );
+
+    const floor = futuresMinimums[short.symbol] ?? 0;
+    const verdict = evaluateTrade({
+      symbol: short.symbol,
+      sizeUsd: short.sizeUsd,
+      spentTodayUsd: 0,
+      venue: "futures",
+      side: short.side,
+      leverage: short.leverage ?? 1,
+      minNotionalUsd: floor,
+    });
+    console.log(`  budget: ${verdict.decision}: ${verdict.reason}`);
+    check(
+      "the budget layer rules on the short without needing any inventory",
+      ["ALLOW", "BLOCK", "REQUIRE_APPROVAL"].includes(verdict.decision),
+      verdict.reason,
+    );
+    // The point of telling the model the floors. A short it cannot fill is a
+    // beat wasted, and on a demo it reads as an agent that never trades.
+    check(
+      "the short it picked is one the cap can actually pay for",
+      verdict.decision !== "BLOCK" || !verdict.reason.includes("per-trade cap"),
+      verdict.reason,
+    );
+  }
 }
 
 main()
