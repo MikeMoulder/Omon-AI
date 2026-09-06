@@ -24,7 +24,25 @@ see that in ten seconds.
 
 Payments settle on the **open x402 standard rather than Binance's B402**, because
 B402 merchant onboarding requires an Entity (business) Binance account that an
-individual cannot apply for. The b402 code seam exists and flips on one env var.
+individual cannot apply for.
+
+The B402 mapping itself is finished and checkable. `X402_RAIL=b402-preview`
+publishes it — same code path the live rail uses — while payments keep settling
+on the public facilitator, so nothing on screen claims B402 is taking money when
+it is not:
+
+```bash
+X402_RAIL=b402-preview npm run dev
+curl localhost:3000/api/b402 | jq .          # the exact BSC challenge, and what is still missing
+npx tsx scripts/b402-test.ts                 # 25 assertions, no credentials, no network
+```
+
+`wouldAdvertise` in that response is built by `b402Accepts()`, the same function
+the live rail calls, and the test suite runs the provider's own
+`B402ExactServerScheme.parsePrice` against it. What is genuinely blocked is one
+handshake: `signerAddress`/`spenderAddress` come from the facilitator's
+RSA-gated per-merchant `/supported`, so they are left unset rather than guessed.
+Flipping to `X402_RAIL=b402` with credentials changes nothing else.
 
 ---
 
@@ -54,6 +72,7 @@ screen.
 npx tsx scripts/mcp-smoke.ts     # opens a real MCP session, asserts no REST fallback
 curl localhost:3000/api/agent-os # live connection state, tools resolved, token health
 curl localhost:3000/.well-known/x402 | jq .agentOs
+curl localhost:3000/api/b402      # B402 rail: what is mapped, what is missing, what it would issue
 ```
 
 `mcp-smoke.ts` deliberately fails if the data arrived over the REST fallback
@@ -99,6 +118,7 @@ npx tsx scripts/mcp-smoke.ts                          # Binance MCP, live
 npx tsx scripts/indicators-test.ts ../ren-ai          # port vs the original, bar for bar
 npx tsx scripts/strategy-smoke.ts --live              # candles -> conviction -> signal -> budget
 npx tsx scripts/discovery-smoke.ts                    # 21 checks, the path a stranger's agent walks
+npx tsx scripts/b402-test.ts                          # 25 checks, the Binance B402 mapping, offline
 node scripts/pay.mjs /api/intel                       # an outside client pays a real 402
 ```
 

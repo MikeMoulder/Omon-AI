@@ -222,12 +222,46 @@ export function agentOsUsage(
   };
 }
 
+/**
+ * The one sentence a buyer must read before it spends anything, derived from
+ * the rail actually in force rather than written once and left to rot.
+ *
+ * This used to be a constant asserting Base Sepolia and "not Binance's B402
+ * rail" — which was true on the default rail and a flat lie on either of the
+ * other two. A disclosure that survives a config change only by coincidence is
+ * not a disclosure.
+ */
+export function disclosureFor(rail: string, settlementRail: string): string {
+  if (rail === "b402") {
+    return (
+      "Payments settle on Binance OnchainPay (B402) on BNB Smart Chain, in the ERC-20 the " +
+      "merchant account is configured for. Live merchant rail — not a testnet."
+    );
+  }
+  if (rail === "b402-preview") {
+    return (
+      "B402 preview. The Binance OnchainPay mapping is published and inspectable at /api/b402, " +
+      "including the exact challenge this service would issue on BNB Smart Chain, but it is NOT " +
+      "settling: B402 merchant onboarding requires a business entity account. The payable " +
+      "challenge on every paid endpoint settles in test USDC on Base Sepolia via the public x402 " +
+      "facilitator. Do not treat the B402 block as payable."
+    );
+  }
+  return (
+    "Payments settle in test USDC on Base Sepolia via the public x402 facilitator. Not mainnet, " +
+    "and not Binance's B402 rail: B402 merchant onboarding requires a business entity account. " +
+    `(settlement rail: ${settlementRail})`
+  );
+}
+
 export function serviceManifest(args: {
   baseUrl: string;
   price: string;
   network: string;
   payTo: string;
   rail: string;
+  settlementRail: string;
+  b402?: Record<string, unknown>;
   mcp: { mode: "live" | "off"; reason: string };
   cli: { mode: "live" | "off"; reason: string };
 }): Record<string, unknown> {
@@ -237,25 +271,40 @@ export function serviceManifest(args: {
     description: SERVICE_DESCRIPTION,
     tags: SERVICE_TAGS,
     agentOs: agentOsUsage(args.mcp, args.cli),
-    // Said plainly and first. Both money rails here are non-production, and a
-    // buyer discovering this service deserves to know before it pays.
-    disclosure:
-      "Payments settle in test USDC on Base Sepolia via the public x402 facilitator. Not mainnet, and not Binance's B402 rail: B402 merchant onboarding requires a business entity account.",
+    // Said plainly and first. A buyer discovering this service deserves to know
+    // which rail its money lands on before it pays.
+    disclosure: disclosureFor(args.rail, args.settlementRail),
     payment: {
       protocol: "x402",
       scheme: "exact",
       rail: args.rail,
+      // Which rail money actually moves on. Differs from `rail` in preview mode,
+      // and a buyer that reads only one of the two must read this one.
+      settlementRail: args.settlementRail,
       network: args.network,
       price: args.price,
       payTo: args.payTo,
       note: "Send an unpaid request to any paid endpoint to receive a 402 challenge with full payment requirements.",
     },
+    // Present whenever the B402 mapping is published, live or previewed, so an
+    // agent can see the BSC requirements without a second request.
+    ...(args.b402 ? { b402: args.b402 } : {}),
     endpoints: ENDPOINTS.map((e) => ({ ...e, url: `${args.baseUrl}${e.path}` })),
     free: [
       { path: "/.well-known/x402", description: "This document." },
       { path: "/api/manifest", description: "This document, canonical path." },
       { path: "/api/intel/refresh", description: "Cache status (GET)." },
       { path: "/api/signals/refresh", description: "Signal cache status (GET)." },
+      {
+        path: "/api/b402",
+        description:
+          "Binance OnchainPay (B402) rail state: the exact BSC challenge this service would issue, which credentials are still missing, and whether it is settling.",
+      },
+      {
+        path: "/api/b402",
+        description:
+          "Binance OnchainPay (B402) rail state: the exact BSC challenge this service would issue, which credentials are still missing, and whether it is settling.",
+      },
     ],
   };
 }

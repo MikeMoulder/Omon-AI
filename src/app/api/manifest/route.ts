@@ -12,7 +12,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { serviceManifest } from "@/lib/service";
 import { mcpMode } from "@/lib/mcp";
 import { cliMode } from "@/lib/skillhub";
-import { network, payTo, price, rail } from "@/lib/x402";
+import { b402Report, b402Selected, network, payTo, price, rail, settlementRail } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +29,20 @@ export async function GET(request: NextRequest) {
   // why. A manifest that claims an integration it no longer has is worse than
   // one that admits the gap.
   return NextResponse.json(
-    serviceManifest({ baseUrl, price, network, payTo, rail, mcp: mcpMode(), cli: cliMode() }),
+    serviceManifest({
+      baseUrl,
+      price,
+      network,
+      payTo,
+      rail,
+      settlementRail,
+      // Published whenever the B402 mapping is selected — live or preview — so
+      // an agent learns the BSC requirements from the catalogue it already read,
+      // without a second round trip. Absent entirely on the plain public rail.
+      b402: b402Selected ? b402Report() : undefined,
+      mcp: mcpMode(),
+      cli: cliMode(),
+    }),
     { headers: { "cache-control": "public, max-age=60" } },
   );
 }

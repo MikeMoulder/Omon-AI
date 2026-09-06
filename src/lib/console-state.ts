@@ -32,7 +32,7 @@ import { MAX_LEVERAGE, futuresMode } from "@/lib/futures";
 import { SERVICE_NAME, SERVICE_DESCRIPTION } from "@/lib/service";
 import { schedulerStatus, type SchedulerStatus } from "@/lib/scheduler";
 import { lastTick, tickCount, tickRunning, type TickResult } from "@/lib/tick";
-import { network, price, priceToken, rail } from "@/lib/x402";
+import { b402Report, b402Selected, network, price, priceToken, rail, settlementRail } from "@/lib/x402";
 
 type Mode = { mode: string; reason: string };
 
@@ -49,7 +49,20 @@ export type ConsoleSnapshot = {
     mcp: Mode;
     skillHub: Mode;
   };
-  payment: { rail: string; network: string; price: string; token: string };
+  payment: {
+    rail: string;
+    /**
+     * Where money actually lands. Kept separate from `rail` so the console can
+     * never show "b402" over a figure that settled on Base Sepolia — in preview
+     * mode those are two different answers and the screen must say so.
+     */
+    settlementRail: string;
+    network: string;
+    price: string;
+    token: string;
+    /** The B402 mapping report, present only when that rail is selected. */
+    b402: Record<string, unknown> | null;
+  };
   intel: { rows: Intel[]; status: CacheStatus; source: "cache" | "fixture" };
   signals: { rows: Signal[]; status: SignalCacheStatus; source: "cache" | "empty" };
   money: { in: Purchase[]; out: Action[] };
@@ -181,7 +194,14 @@ export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
       mcp: mcpMode(),
       skillHub: cliMode(),
     },
-    payment: { rail, network, price, token: priceToken },
+    payment: {
+      rail,
+      settlementRail,
+      network,
+      price,
+      token: priceToken,
+      b402: b402Selected ? b402Report() : null,
+    },
     intel: { rows: intel.intel, status: intelCacheStatus(), source: intel.source },
     signals: { rows: signals.signals, status: signalCacheStatus(), source: signals.source },
     money: { in: purchases(12), out: actions(12) },

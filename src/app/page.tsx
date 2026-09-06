@@ -1207,6 +1207,7 @@ function SystemPanel({ snapshot }: { snapshot: ConsoleSnapshot }) {
                 {payment.rail} on {payment.network}, {payment.price} {payment.token}
               </dd>
             </div>
+            {payment.b402 ? <B402Row b402={payment.b402} /> : null}
             <div className="flex gap-2">
               <dt className="text-ink2">On disk</dt>
               <dd className="ml-auto text-right text-ink">
@@ -1218,6 +1219,43 @@ function SystemPanel({ snapshot }: { snapshot: ConsoleSnapshot }) {
           </dl>
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/**
+ * The Binance OnchainPay row in diagnostics.
+ *
+ * Two lines, and the second one is the point: a rail that is mapped but not
+ * settling has to say BOTH halves on screen at once. Showing only "b402" over a
+ * figure that landed on Base Sepolia is the exact misreading this row exists to
+ * prevent, so the not-settling case leads with that fact and names what is
+ * missing rather than showing a green pill and hoping nobody clicks through.
+ */
+function B402Row({ b402 }: { b402: Record<string, unknown> }) {
+  const settling = b402.settling === true;
+  const missing = [
+    ...(((b402.missing as { credentials?: string[] } | undefined)?.credentials) ?? []),
+    ...(((b402.missing as { token?: string[] } | undefined)?.token) ?? []),
+  ];
+
+  return (
+    <div className="flex gap-2">
+      <dt className="text-ink2">B402</dt>
+      <dd className="ml-auto text-right text-ink">
+        {settling ? (
+          <>settling on {String(b402.network)}</>
+        ) : (
+          <>
+            <span className="text-ink2">mapped, not settling</span>
+            <span className="block text-ink2">
+              {missing.length > 0 ? `${missing.length} var${missing.length === 1 ? "" : "s"} unset` : "credentials pending"}
+              {" — see /api/b402"}
+            </span>
+          </>
+        )}
+      </dd>
     </div>
   );
 }
