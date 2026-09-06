@@ -98,3 +98,29 @@ export type OrderResult = {
 
 /** One env var read by every seam. Set on the deployed URL before recording. */
 export type DemoMode = "fixture" | "auto" | "live";
+
+/**
+ * One execution, as the exchange reported it.
+ *
+ * Distinct from `Action`, and both are needed: an Action is what the budget
+ * layer *decided*, a Fill is what the market actually *did*. A BLOCK produces an
+ * Action and no Fill; an ALLOW whose order errored produces an Action and no
+ * Fill. Only Fills carry a price, and only prices make P&L possible.
+ */
+export type Fill = {
+  id: string;
+  /** The Action this execution came from, so the console can join the two. */
+  actionId: string;
+  orderId: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  /** Base asset actually filled, e.g. BTC. */
+  qty: number;
+  /** Quote asset actually moved, USDT. */
+  quoteUsd: number;
+  /** quoteUsd / qty — the average price this fill got. */
+  price: number;
+  /** false = fixture. The console must never show a fixture fill as a real one. */
+  live: boolean;
+  createdAt: string; // ISO
+};

@@ -12,14 +12,27 @@
  * `fresh: false` with their age, and callers surface that. Never quietly serve
  * an hour-old row as if it were current.
  *
- * Storage is in-process. It survives across requests on a warm server and is
- * lost on a cold start, which is fine while this is the only reader; when the
- * database lands, this file is the one place that changes.
+ * Storage is durable as of 2026-09-06. Rows, the refresh clock and the dedupe
+ * set are written to `data/intel.json` after every successful refresh and read
+ * back at boot, through src/lib/store.ts. Before that, a restart left the
+ * console with an empty News panel until the next beat — and worse, dropped the
+ * dedupe set, so the first refresh after every restart paid Gemini again for
+ * headlines it had already analysed.
+ *
+ * The refresh clock is restored along with the rows, deliberately: a cache with
+ * a five minute TTL that resets its own clock on restart is not a cache, and
+ * restarting twice in a minute should not cost two rounds of model quota.
  */
 import type { Intel } from "@/lib/types";
 import { fetchHeadlines, newsMode } from "@/lib/news";
 import { intelFromHeadline, keysAreSplit, llmMode } from "@/lib/llm";
 import { latestIntel } from "@/lib/fixtures";
+import { readDoc, writeDoc } from "@/lib/store";
+
+/** What `data/intel.json` holds. Rows newest first, exactly as memory holds them. */
+type IntelDoc = { rows: Intel[]; refreshedAt: number; analysed: string[] };
+
+const DOC = "intel";
 
 const TTL_MS = Number(process.env.INTEL_TTL_MS ?? 5 * 60_000);
 
@@ -50,6 +63,36 @@ const analysed = new Set<string>();
 /** One refresh at a time. Two concurrent ticks would double-spend the quota. */
 let inflight: Promise<Intel[]> | null = null;
 
+let hydrated = false;
+
+/**
+ * Read the cache back off the disk, once per process.
+ *
+ * Called from every exported entry point for the same reason the ledger's is:
+ * a route, the tick and the SSE stream can each be the first thing to touch
+ * this module, and none of them is guaranteed to run before the others.
+ */
+function hydrate(): void {
+  if (hydrated) return;
+  hydrated = true;
+
+  const doc = readDoc<IntelDoc>(DOC);
+  if (!doc || !Array.isArray(doc.rows)) return;
+
+  rows = doc.rows.slice(0, MAX_ROWS);
+  refreshedAt = typeof doc.refreshedAt === "number" ? doc.refreshedAt : 0;
+  for (const url of doc.analysed ?? []) analysed.add(url);
+
+  if (rows.length > 0) {
+    console.log(`[intel] recovered ${rows.length} row(s) from disk`);
+  }
+}
+
+/** Save after anything that changed the rows, the clock or the dedupe set. */
+function persist(): void {
+  writeDoc(DOC, { rows, refreshedAt, analysed: [...analysed] } satisfies IntelDoc);
+}
+
 export type CacheStatus = {
   rows: number;
   fresh: boolean;
@@ -73,6 +116,7 @@ export function isFresh(): boolean {
 }
 
 export function intelCacheStatus(): CacheStatus {
+  hydrate();
   return {
     rows: rows.length,
     fresh: isFresh(),
@@ -97,6 +141,7 @@ export function getIntel(limit = 10): {
   ageMs: number | null;
   source: "cache" | "fixture";
 } {
+  hydrate();
   if (rows.length === 0) {
     return { intel: [latestIntel()].slice(0, limit), fresh: false, ageMs: null, source: "fixture" };
   }
@@ -117,6 +162,7 @@ async function doRefresh(): Promise<Intel[]> {
     // so a quiet news hour does not leave every row flagged stale.
     refreshedAt = Date.now();
     lastError = null;
+    persist();
     return rows;
   }
 
@@ -147,6 +193,7 @@ async function doRefresh(): Promise<Intel[]> {
   }
 
   refreshedAt = Date.now();
+  persist();
   return rows;
 }
 
@@ -158,6 +205,7 @@ async function doRefresh(): Promise<Intel[]> {
  * records the reason in `lastError` for the console to show.
  */
 export async function refreshIntel(opts: { force?: boolean } = {}): Promise<Intel[]> {
+  hydrate();
   if (!opts.force && isFresh()) return rows;
   if (inflight) return inflight;
 
@@ -179,12 +227,14 @@ export async function refreshIntel(opts: { force?: boolean } = {}): Promise<Inte
  * one of those calls a no-op.
  */
 export function revalidateIntel(): void {
+  hydrate();
   if (isFresh() || inflight) return;
   void refreshIntel();
 }
 
-/** Test hook. Drops every row and the dedupe set. */
+/** Test hook. Drops memory only; the file on disk is left alone. */
 export function __resetIntelCache(): void {
+  hydrated = true;
   rows = [];
   refreshedAt = 0;
   lastError = null;

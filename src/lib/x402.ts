@@ -37,8 +37,18 @@ export const priceUsd = Number(process.env.X402_PRICE ?? "0.01");
 /**
  * What a buyer actually pays in. Display only — the 402 challenge names the
  * asset itself, and nothing downstream converts using this string.
+ *
+ * Rail-aware, and the b402 case is not symmetry for its own sake. The public
+ * rail settles test USDC on Base Sepolia, which is knowable here. B402 does
+ * not work that way: the asset is a token contract the facilitator supplies
+ * per merchant via `/supported`, and that endpoint is RSA-gated to merchants,
+ * so this process genuinely cannot know the symbol. Printing "USDC" there
+ * would put a claim on the console — and in the video — that nothing verified,
+ * next to a settlement on BNB Smart Chain. Say "token" and be honestly vague
+ * instead, or set X402_TOKEN_SYMBOL once the merchant account states it.
  */
-export const priceToken = process.env.X402_TOKEN_SYMBOL ?? "USDC";
+export const priceToken =
+  process.env.X402_TOKEN_SYMBOL ?? (rail === "b402" ? "token" : "USDC");
 
 let serverPromise: Promise<x402ResourceServer> | null = null;
 

@@ -411,12 +411,26 @@ export async function placeOrder(args: {
   const { mode } = exchangeMode();
 
   if (mode === "fixture") {
+    // A fixture fill still needs a base quantity, and it has to come from a real
+    // mark. `executedQty: "0"` was the old answer and it silently broke every
+    // position downstream — src/lib/pnl.ts cannot price a fill with no quantity,
+    // so a fixture demo showed trades and no P&L at all. Prices need no key and
+    // fall back to public REST, so this read works in fixture mode; when it does
+    // not, the quantity stays 0 and the fill is dropped rather than invented.
+    let executedQty = "0";
+    try {
+      const mark = Number((await getPrices([args.symbol]))[args.symbol]);
+      if (Number.isFinite(mark) && mark > 0) executedQty = (args.sizeUsd / mark).toFixed(8);
+    } catch (err) {
+      console.warn("[exchange] fixture fill could not be priced:", err);
+    }
+
     return {
       orderId: `fixture_${Date.now()}`,
       symbol: args.symbol,
       side: args.side,
       status: "FILLED",
-      executedQty: "0",
+      executedQty,
       cummulativeQuoteQty: args.sizeUsd.toFixed(2),
       transactTime: Date.now(),
       live: false,

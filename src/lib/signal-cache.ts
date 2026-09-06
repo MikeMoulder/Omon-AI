@@ -11,10 +11,15 @@
  * served — a stale signal beats no signal for someone who already paid — but
  * flagged `fresh: false` with their age, so a buyer can judge for itself.
  *
- * Storage is in-process, like the intel cache: it survives across requests on a
- * warm server and is lost on a cold start. That was the demo risk on serverless;
- * on the VPS the process is long-lived, so the cache stays warm. When a database
- * lands, this file and intel-cache.ts are the two places that change.
+ * Storage is durable as of 2026-09-06, the same as the intel cache and through
+ * the same src/lib/store.ts: rows, the refresh clock and the set of intel ids
+ * already turned into a signal go to `data/signals.json` and come back at boot.
+ *
+ * Restoring `analysed` matters more here than anywhere else. It is what stops
+ * one story becoming two trades, and it used to be dropped on every restart —
+ * so a restart inside a signal's TTL would build a second signal from the same
+ * intel row and propose the same trade again. The ledger's `hasTradedSignal()`
+ * is now durable too, so there were two independent guards to restore.
  *
  * The tick (handoff.md section 7) will drive `refreshSignals()` on an interval.
  * Until it exists, the paid route revalidates in the background on read, which
@@ -25,6 +30,12 @@ import { CANDLE_INTERVAL, exchangeMode, getCandles, getPrices } from "@/lib/exch
 import { llmMode, signalFromIntel } from "@/lib/llm";
 import { conviction, technicalSnapshot, type TechnicalSnapshot } from "@/lib/strategy";
 import { getIntel, intelCacheStatus } from "@/lib/intel-cache";
+import { readDoc, writeDoc } from "@/lib/store";
+
+/** What `data/signals.json` holds. Rows newest first, exactly as memory holds them. */
+type SignalDoc = { rows: Signal[]; refreshedAt: number; analysed: string[] };
+
+const DOC = "signals";
 
 const TTL_MS = Number(process.env.SIGNAL_TTL_MS ?? Number(process.env.INTEL_TTL_MS ?? 5 * 60_000));
 
@@ -56,6 +67,30 @@ const analysed = new Set<string>();
 /** One refresh at a time. Two concurrent ticks would double-spend the quota. */
 let inflight: Promise<Signal[]> | null = null;
 
+let hydrated = false;
+
+/** Read the cache back off the disk, once per process. See the intel cache. */
+function hydrate(): void {
+  if (hydrated) return;
+  hydrated = true;
+
+  const doc = readDoc<SignalDoc>(DOC);
+  if (!doc || !Array.isArray(doc.rows)) return;
+
+  rows = doc.rows.slice(0, MAX_ROWS);
+  refreshedAt = typeof doc.refreshedAt === "number" ? doc.refreshedAt : 0;
+  for (const id of doc.analysed ?? []) analysed.add(id);
+
+  if (rows.length > 0) {
+    console.log(`[signals] recovered ${rows.length} row(s) from disk`);
+  }
+}
+
+/** Save after anything that changed the rows, the clock or the dedupe set. */
+function persist(): void {
+  writeDoc(DOC, { rows, refreshedAt, analysed: [...analysed] } satisfies SignalDoc);
+}
+
 export type SignalCacheStatus = {
   rows: number;
   fresh: boolean;
@@ -77,6 +112,7 @@ export function isFresh(): boolean {
 }
 
 export function signalCacheStatus(): SignalCacheStatus {
+  hydrate();
   return {
     rows: rows.length,
     fresh: isFresh(),
@@ -104,6 +140,7 @@ export function getSignals(limit = 10): {
   ageMs: number | null;
   source: "cache" | "empty";
 } {
+  hydrate();
   if (rows.length === 0) {
     return { signals: [], fresh: false, ageMs: null, source: "empty" };
   }
@@ -147,6 +184,7 @@ async function doRefresh(): Promise<Signal[]> {
   if (analysed.has(intel.id)) {
     refreshedAt = Date.now();
     lastError = null;
+    persist();
     return rows;
   }
 
@@ -173,6 +211,7 @@ async function doRefresh(): Promise<Signal[]> {
   rows = [signal, ...rows].slice(0, MAX_ROWS);
   refreshedAt = Date.now();
   lastError = null;
+  persist();
   return rows;
 }
 
@@ -184,6 +223,7 @@ async function doRefresh(): Promise<Signal[]> {
  * and records the reason in `lastError` for the console to show.
  */
 export async function refreshSignals(opts: { force?: boolean } = {}): Promise<Signal[]> {
+  hydrate();
   if (!opts.force && isFresh()) return rows;
   if (inflight) return inflight;
 
@@ -208,13 +248,15 @@ export async function refreshSignals(opts: { force?: boolean } = {}): Promise<Si
  * fixture intel row would put a fabricated trade in a paid response.
  */
 export function revalidateSignals(): void {
+  hydrate();
   if (isFresh() || inflight) return;
   if (intelCacheStatus().rows === 0) return;
   void refreshSignals();
 }
 
-/** Test hook. Drops every row and the dedupe set. */
+/** Test hook. Drops memory only; the file on disk is left alone. */
 export function __resetSignalCache(): void {
+  hydrated = true;
   rows = [];
   refreshedAt = 0;
   lastError = null;

@@ -18,15 +18,19 @@
  */
 import type { Action, Intel, Purchase, Signal } from "@/lib/types";
 import { limitsFromEnv, type BudgetLimits } from "@/lib/budget";
-import { exchangeMode, getBalances } from "@/lib/exchange";
+import { exchangeMode, getBalances, getPrices } from "@/lib/exchange";
 import { getIntel, intelCacheStatus, type CacheStatus } from "@/lib/intel-cache";
 import { getSignals, signalCacheStatus, type SignalCacheStatus } from "@/lib/signal-cache";
-import { actions, ledgerSummary, purchases, type LedgerSummary } from "@/lib/ledger";
+import { actions, fills, ledgerSummary, purchases, type LedgerSummary } from "@/lib/ledger";
+import { computePnl, type PnlSummary } from "@/lib/pnl";
+import { storeStatus, type StoreStatus } from "@/lib/store";
 import { llmMode } from "@/lib/llm";
 import { mcpMode, mcpUsage } from "@/lib/mcp";
 import { newsMode } from "@/lib/news";
 import { cliMode } from "@/lib/skillhub";
 import { SERVICE_NAME, SERVICE_DESCRIPTION } from "@/lib/service";
+import { schedulerStatus, type SchedulerStatus } from "@/lib/scheduler";
+import { lastTick, tickCount, tickRunning, type TickResult } from "@/lib/tick";
 import { network, price, priceToken, rail } from "@/lib/x402";
 
 type Mode = { mode: string; reason: string };
@@ -48,15 +52,72 @@ export type ConsoleSnapshot = {
   signals: { rows: Signal[]; status: SignalCacheStatus; source: "cache" | "empty" };
   money: { in: Purchase[]; out: Action[] };
   ledger: LedgerSummary;
+  /**
+   * Positions and profit, marked against the same `prices` below.
+   *
+   * Derived here rather than stored, so it cannot disagree with the fills — and
+   * marked with the prices in this very snapshot, so the P&L on screen is
+   * arithmetic the viewer can check against the marks on screen.
+   */
+  pnl: PnlSummary;
   limits: BudgetLimits;
   /** Spot Demo Mode balances — the account orders actually hit. Null while unreadable. */
   balances: Record<string, string> | null;
   balancesError: string | null;
+  /** Live marks for the traded pairs, fetched over the Agent OS rail. */
+  prices: Record<string, string>;
   /** Which rail each market read last used, written by src/lib/exchange.ts. */
   usage: ReturnType<typeof mcpUsage>;
+  /**
+   * The heartbeat. On screen as a countdown, because "why do I have to press a
+   * button" is the first thing anyone asks of a console that looks idle — the
+   * answer has to be visible rather than documented.
+   */
+  scheduler: SchedulerStatus & { beats: number; busy: boolean };
+  lastTick: TickResult | null;
+  /**
+   * Whether anything on this screen would survive a restart.
+   *
+   * On the console because it was found the hard way: `pm2 restart omon` erased
+   * the entire ledger, and nothing on the page had ever claimed it would not.
+   * A silent amnesiac is worse than one that says so.
+   */
+  storage: StoreStatus;
 };
 
 const BALANCE_TTL_MS = Number(process.env.CONSOLE_BALANCE_TTL_MS ?? 15_000);
+
+/**
+ * Prices move on their own, which is the point — a console whose every number
+ * is frozen between beats looks broken even when it is working. Same TTL as
+ * balances, and the same reasoning: on the Skill Hub rail this is one batched
+ * process spawn, so it must not run once per snapshot.
+ */
+const PRICE_TTL_MS = Number(process.env.CONSOLE_PRICE_TTL_MS ?? 15_000);
+
+let priceRows: Record<string, string> = {};
+let priceAt = 0;
+let priceInflight: Promise<void> | null = null;
+
+async function prices(): Promise<void> {
+  if (Date.now() - priceAt < PRICE_TTL_MS) return;
+  if (priceInflight) return priceInflight;
+
+  priceInflight = getPrices(limitsFromEnv().allowedSymbols)
+    .then((rows) => {
+      priceRows = rows;
+    })
+    .catch(() => {
+      // Keep the last marks on screen. A stale price is obvious from the rest
+      // of the page; a blank one just looks like the console broke.
+    })
+    .finally(() => {
+      priceAt = Date.now();
+      priceInflight = null;
+    });
+
+  return priceInflight;
+}
 
 let balanceRows: Record<string, string> | null = null;
 let balanceError: string | null = null;
@@ -94,7 +155,8 @@ async function balances(): Promise<void> {
 }
 
 export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
-  await balances();
+  // Both are TTL-guarded no-ops on all but one snapshot in fifteen seconds.
+  await Promise.all([balances(), prices()]);
 
   const intel = getIntel(8);
   const signals = getSignals(8);
@@ -115,9 +177,14 @@ export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
     signals: { rows: signals.signals, status: signalCacheStatus(), source: signals.source },
     money: { in: purchases(12), out: actions(12) },
     ledger: ledgerSummary(),
+    pnl: computePnl(fills(), priceRows),
     limits: limitsFromEnv(),
     balances: balanceRows,
     balancesError: balanceError,
+    prices: priceRows,
     usage: mcpUsage(),
+    scheduler: { ...schedulerStatus(), beats: tickCount(), busy: tickRunning() },
+    lastTick: lastTick(),
+    storage: storeStatus(),
   };
 }

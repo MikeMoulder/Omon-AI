@@ -71,6 +71,16 @@ type Snapshot = {
   limits: { maxTradeUsd: number; dailyTradeUsd: number };
   money: { in: unknown[]; out: unknown[] };
   payment: { price: string; network: string };
+  prices: Record<string, string>;
+  pnl: {
+    positions: Array<{ symbol: string; qty: number; markPrice: number | null }>;
+    realizedUsd: number;
+    unrealizedUsd: number;
+    totalUsd: number;
+    openCount: number;
+    fillCount: number;
+    unpriced: string[];
+  };
 };
 
 async function main(): Promise<void> {
@@ -102,6 +112,40 @@ async function main(): Promise<void> {
     "money in and money out are both present",
     Array.isArray(snapshot.money?.in) && Array.isArray(snapshot.money?.out),
   );
+
+  // P&L is the number a viewer looks for first and the one they cannot check by
+  // hand, so the shape is asserted even when the ledger is empty — a snapshot
+  // with no `pnl` renders a console with no profit on it, which is the exact
+  // bug this section exists to catch.
+  const pnl = snapshot.pnl;
+  check(
+    "profit and loss is in the snapshot",
+    Boolean(pnl) && typeof pnl.totalUsd === "number" && Array.isArray(pnl.positions),
+    pnl ? `${pnl.fillCount} fill(s), $${pnl.totalUsd.toFixed(4)} total` : "missing",
+  );
+
+  if (pnl) {
+    check(
+      "realised and open add up to the total",
+      Math.abs(pnl.realizedUsd + pnl.unrealizedUsd - pnl.totalUsd) < 1e-9,
+      `${pnl.realizedUsd.toFixed(4)} + ${pnl.unrealizedUsd.toFixed(4)} = ${pnl.totalUsd.toFixed(4)}`,
+    );
+    // An open position with no mark is excluded from the totals rather than
+    // counted as zero — so it must be named, or the number is quietly partial.
+    const unmarked = pnl.positions.filter((row) => row.qty > 0 && row.markPrice === null);
+    check(
+      "every unpriced position is declared",
+      unmarked.every((row) => pnl.unpriced.includes(row.symbol)),
+      unmarked.length === 0 ? "all positions priced" : pnl.unpriced.join(" "),
+    );
+    check(
+      "open positions are marked at the prices on screen",
+      pnl.positions
+        .filter((row) => row.qty > 0 && row.markPrice !== null)
+        .every((row) => Number(snapshot.prices?.[row.symbol]) === row.markPrice),
+      `${pnl.openCount} open`,
+    );
+  }
 
   if (!withTick) {
     console.log("\n(pass --tick to drive a live beat and prove the refusal)\n");

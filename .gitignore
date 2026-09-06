@@ -50,3 +50,8 @@ next-env.d.ts
 
 # ...but the template must ship: it is how a judge sets the project up.
 !.env.example
+
+# The durable ledger, caches and beat counter (src/lib/store.ts). Runtime state:
+# it is the record of what this deployment actually did, not source. Never
+# commit it, and never delete it to "clean up" — the P&L is derived from it.
+/data/

@@ -11,6 +11,8 @@
 import type { Intel, Signal, Direction } from "@/lib/types";
 import type { Conviction, TechnicalSnapshot } from "@/lib/strategy";
 import { latestIntel } from "@/lib/fixtures";
+import { limitsFromEnv } from "@/lib/budget";
+import { MIN_NOTIONAL_USD } from "@/lib/exchange";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -319,6 +321,16 @@ export async function signalFromIntel(args: {
 
   const c = args.conviction;
 
+  // What the budget layer will actually accept, asked for rather than assumed.
+  // REQUIRE_APPROVAL is a refusal as far as an unattended run is concerned, so
+  // the ceiling is the lower of the two thresholds.
+  const limits = limitsFromEnv();
+  const sizeFloor = MIN_NOTIONAL_USD;
+  const sizeCeiling = Math.max(
+    sizeFloor,
+    Math.min(limits.maxTradeUsd, limits.requireApprovalAboveUsd),
+  );
+
   const out = await generate<{
     symbol: string;
     side: "BUY" | "SELL";
@@ -332,7 +344,19 @@ export async function signalFromIntel(args: {
       `symbol: must be one of these exact trading pairs: ${Object.keys(args.prices).join(", ")}.`,
       "side: BUY or SELL. This is a spot account with no borrowing, so prefer BUY;",
       "  only choose SELL to reduce an asset the account already holds.",
-      "sizeUsd: between 5 and 50. Size on AGREEMENT, not on either signal alone —",
+      // The ceiling is READ FROM THE BUDGET, never written here as a literal.
+      //
+      // It used to say "between 5 and 50" while BUDGET_MAX_TRADE_USD was 25, and
+      // the next line tells the model to size UP on agreement — so the strongest
+      // signals were precisely the ones the budget layer refused, and a demo
+      // could run all day with a full intel feed and zero fills. The two numbers
+      // have to come from one place or they drift apart again silently.
+      //
+      // This does NOT relax the leash: src/lib/budget.ts still checks every
+      // proposal and still treats sizeUsd as hostile. Telling the model the
+      // limit only stops it wasting its proposals outside a range it was never
+      // allowed to use.
+      `sizeUsd: between ${sizeFloor} and ${sizeCeiling}. Size on AGREEMENT, not on either signal alone —`,
       "  news and chart pointing the same way earns a larger size than loud news",
       "  against a hostile chart, which should be near the minimum.",
       "thesis: one sentence. Cite one concrete number from the technical picture",
