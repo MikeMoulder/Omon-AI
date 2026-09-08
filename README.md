@@ -561,3 +561,104 @@ inspect the provenance of what it is buying *before* it spends anything:
 > reports which rail actually served the last call. Order writes go through Spot Demo Mode
 > and the USDⓈ-M futures host only. The MCP token authorises a real Binance account, so no
 > order is ever placed over MCP."
+
+---
+
+## 7. The beat, end to end
+
+One beat, every five minutes, unattended, since deployment.
+[`src/lib/tick.ts`](src/lib/tick.ts) is the whole thing — and the console's manual button
+calls the **exact same function**, because a demo button that runs different code from the
+scheduler proves nothing at all about the running system.
+
+| # | Step | Where |
+|---|---|---|
+| 0 | **Check the book for an exit first.** A stop, a target or a time limit outranks any new idea, and a beat that is exiting skips the model entirely | [`src/lib/exits.ts`](src/lib/exits.ts) |
+| 1 | Pull headlines from RSS feeds. No key, no signup, no vendor | [`src/lib/news.ts`](src/lib/news.ts) |
+| 2 | **Intel Agent**: headline → `{assets, direction, confidence, thesis}`, structured output | [`src/lib/llm.ts`](src/lib/llm.ts) |
+| 3 | Cache the intel — deduped, 5-minute TTL, durable across restarts | [`src/lib/intel-cache.ts`](src/lib/intel-cache.ts) |
+| 4 | **Read Binance candles and prices through Agent OS**, stamping the rail | [`src/lib/exchange.ts`](src/lib/exchange.ts) |
+| 5 | Compute the chart half: regime, breakout, ATR, RSI, conviction | [`src/lib/strategy.ts`](src/lib/strategy.ts) |
+| 6 | **Signal Agent**: news + chart → a sized, venue-routed trade | [`src/lib/llm.ts`](src/lib/llm.ts) |
+| 7 | Establish position facts *before* the verdict: what is held on spot, whether a futures order opens or closes | [`src/lib/tick.ts`](src/lib/tick.ts) |
+| 8 | **Budget gate**: ALLOW, BLOCK or REQUIRE_APPROVAL — recorded either way | [`src/lib/budget.ts`](src/lib/budget.ts) |
+| 9 | On ALLOW only, place the order, record the **fill with its price**, update P&L | [`src/lib/pnl.ts`](src/lib/pnl.ts) |
+
+**The beat is single-flight, and that is load-bearing rather than tidy.** The scheduler
+firing while someone presses the console button would run two beats concurrently,
+double-spend the model quota, and race two orders against one budget check. Overlapping
+callers get the in-flight beat's result instead.
+
+**`reduceOnly` is decided in step 7 and never taken from the model.** Whether an order
+closes a position is a *fact about the position*, not an opinion the Signal Agent gets to
+have.
+
+---
+
+## 8. Knowing when to sell
+
+For most of this project's life there was no step 0, and its absence was the single worst
+thing about the strategy. A position opened and then sat there until the Signal Agent
+happened, independently, to form an opposing view on that same symbol. That is not a
+strategy with a hold period. **It is a strategy that forgets.**
+
+[`src/lib/exits.ts`](src/lib/exits.ts). No model, no network, **26 assertions**.
+
+| Rule | Default | Why |
+|---|---|---|
+| **Take-profit** | **+2.5%** | Momentum from a headline decays. Bank it |
+| **Stop-loss** | **−1.5%** | Tighter on purpose. The thesis is news-driven momentum, so a position going the wrong way is evidence the read was **wrong**, while one going the right way is only evidence it was right *so far*. Losers should die faster than winners are cut |
+| **Time-stop** | **6h** | A thesis derived from a six-hour-old headline is not a thesis. The news has been priced, and holding past it is a directional bet nobody took deliberately |
+
+**The model is never asked.** Whether to *keep* a position is arithmetic on something that
+already exists, and arithmetic is what a language model is worst at. More importantly, an
+exit is the half of a trade that limits damage: it has to work on the beat where the model
+is rate-limited, hallucinating, or simply down.
+
+**Percentages are measured against notional on both venues, never return-on-margin.** At 3×
+those differ threefold, so a target read off margin would fire on a 0.83% move on futures
+while spot waited for the full 2.5%. One number, one meaning — the same discipline the
+budget layer applies to `sizeUsd`.
+
+### Three bugs this found on first contact with the real ledger
+
+All three had been sitting there invisibly, because nothing had ever tried to sell.
+
+1. **The agent could not close a position it had accumulated.** A $25 per-trade cap with a
+   $1000 daily allowance had let a spot position reach **$198** over several beats, and the
+   stop that wanted to close it was refused for exceeding the per-trade cap. The daily cap
+   had always exempted closes; the per-trade cap and the approval threshold did not — so
+   the "an agent must always be able to get out" rule was only two-thirds true. It is now
+   the general rule. That $198 close subsequently filled as order `11684019827`.
+
+2. **A position too small to close would have starved the agent permanently.** Closing a
+   $14.79 perp rounds the quantity down to the symbol's step and left $7.40 behind — under
+   BNBUSDT's $7.52 futures minimum, and therefore **unclearable by any order at all**.
+   Because exits run *before* the model, that stranded position was proposed and refused on
+   every single beat, pre-empting intel each time. The agent would never have opened
+   another trade for the rest of its life. An exit the exchange would reject is now not an
+   exit: the beat names the stranded position in the log and falls through.
+
+3. **A stop-loss closed half a position and recorded it as closed.** This is the one that
+   would have cost real money. The close was sized from `notionalUsd` — which is
+   `|qty| × entry` — but the order path converts dollars back into units by dividing by the
+   **current** mark and flooring to the symbol's step. Entry dollars buy fewer units once
+   price has moved against you, which is *precisely* when a stop fires. A 0.02 BNB short
+   entered at 739.57 and stopped at 752.71 asked for $14.79; that is 0.0196 at the mark,
+   which floors to **0.01** on a 0.01 step. Half the short stayed open, still exposed, on
+   the trade whose entire job was to remove the exposure. Coarse steps make it worse — a
+   two-step position loses half rather than a crumb — and ETHUSDT escaped only because its
+   step is fine enough that the floor happened to land on the position. Futures closes are
+   now sized on the **live mark**, so the division is exact.
+
+The third one is worth dwelling on, because it is the exact failure mode this whole section
+exists to prevent, and it was *created* by the section itself. **An exit that half-fires is
+worse than no exit at all**: no exit leaves you exposed and honest, while a half-fill leaves
+you exposed and holding a ledger that says you are flat.
+
+The console shows the live distance to all three exits on every open position, so the
+policy is visible *before* it fires rather than only afterwards.
+
+```bash
+npx tsx scripts/exits-test.ts   # 26 assertions, fixtures, no clock and no network
+```
