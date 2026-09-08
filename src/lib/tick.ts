@@ -335,6 +335,11 @@ async function beat(opts: {
     // The exchange's step, not an operator decision, so it is recorded as its
     // own fact rather than folded into `overridden`.
     ...(sizeUsd === requestedSizeUsd ? {} : { preSnapSizeUsd: requestedSizeUsd, snapped: true }),
+    // Every check the gate ran, so a refusal in the ledger can be read back
+    // months later as "check 9 of 13 stopped this, and here is what the other
+    // twelve concluded" rather than one sentence with no context. This is what
+    // the console's veto log renders.
+    checks: decision.checks,
   };
 
   if (decision.decision !== "ALLOW") {
