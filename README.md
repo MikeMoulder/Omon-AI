@@ -585,6 +585,7 @@ system.
 
 | # | Step | Where |
 |---|---|---|
+| 0 | **Check the book for an exit first.** A stop, a target or a time limit outranks any new idea, and a beat that is exiting skips the model entirely | [`src/lib/exits.ts`](src/lib/exits.ts) |
 | 1 | Pull headlines from RSS feeds. No key, no signup | [`src/lib/news.ts`](src/lib/news.ts) |
 | 2 | **Intel Agent**: headline to `{assets, direction, confidence, thesis}` | [`src/lib/llm.ts`](src/lib/llm.ts) |
 | 3 | Cache the intel, deduped, 5 minute TTL, durable across restarts | [`src/lib/intel-cache.ts`](src/lib/intel-cache.ts) |
@@ -594,6 +595,55 @@ system.
 | 7 | Establish position facts *before* the verdict: what is held on spot, whether a futures order opens or closes | [`src/lib/tick.ts`](src/lib/tick.ts) |
 | 8 | **Budget layer**: ALLOW, BLOCK or REQUIRE_APPROVAL. Recorded either way | [`src/lib/budget.ts`](src/lib/budget.ts) |
 | 9 | On ALLOW only, place the order, record the **fill with its price**, update P&L | [`src/lib/pnl.ts`](src/lib/pnl.ts) |
+
+### 5b. Knowing when to sell
+
+For most of this project's life there was no step 0, and that absence was the single
+worst thing about the strategy. A position opened and then sat there until the Signal
+Agent happened, independently, to form an opposing view on that same symbol. That is not
+a strategy with a hold period. It is a strategy that forgets.
+
+[`src/lib/exits.ts`](src/lib/exits.ts). No model, no network, 22 assertions.
+
+| Rule | Default | Why |
+|---|---|---|
+| Take-profit | **+2.5%** | Momentum from a headline decays. Bank it |
+| Stop-loss | **−1.5%** | Tighter on purpose. The thesis is news-driven momentum, so a position going the wrong way is evidence the read was **wrong**, while one going the right way is only evidence it was right *so far*. Losers should die faster than winners are cut |
+| Time-stop | **6h** | A thesis derived from a six-hour-old headline is not a thesis. The news has been priced, and holding past that is a directional bet nobody took deliberately |
+
+**The model is not asked.** Whether to *keep* a position is arithmetic on something that
+already exists, and arithmetic is what a language model is worst at. More importantly an
+exit is the half of a trade that limits damage: it has to work on the beat where the
+model is rate-limited, hallucinating, or down.
+
+**Percentages are measured against notional on both venues, never return-on-margin.** At
+3x those differ threefold, so a target read off margin would fire on a 0.83% move on
+futures while spot waited for 2.5%. One number, one meaning — the same rule the budget
+layer already applies to `sizeUsd`.
+
+**Two bugs this found on its first contact with the real ledger**, both of which had been
+sitting there invisibly because nothing ever tried to sell:
+
+1. **The agent could not close a position it had accumulated.** A $25 per-trade cap with
+   a $1000 daily allowance had let a spot position reach $198 over several beats, and the
+   stop that wanted to close it was refused for exceeding the per-trade cap. The daily cap
+   had always exempted closes; the per-trade cap and the approval threshold did not, so
+   the "an agent must always be able to get out" rule was only two-thirds true. Now it is
+   the general rule. The $198 close subsequently filled as order `11684019827`.
+2. **A position too small to close would have starved the agent permanently.** Closing a
+   $14.79 perp rounds the quantity down to the symbol's step and left $7.40 behind, under
+   BNBUSDT's $7.52 futures minimum — unclearable by any order. Because exits run *before*
+   the model, that stranded position was proposed and refused on every beat, pre-empting
+   intel each time. The agent would never have opened another trade. An exit the exchange
+   would reject is now not an exit: the beat names the stranded position in the log and
+   falls through.
+
+The console shows the distance to all three exits on every open position, so the policy
+is visible before it fires rather than only afterwards.
+
+```bash
+npx tsx scripts/exits-test.ts      # 22 assertions, fixtures, no clock and no network
+```
 
 **The beat is single-flight, and that is load-bearing rather than tidy.** The scheduler
 firing while someone presses the console button would run two beats concurrently,
