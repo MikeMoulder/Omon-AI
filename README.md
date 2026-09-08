@@ -732,3 +732,112 @@ curl -X POST "https://www.omon-ai.duckdns.org/api/cron/tick?sizeUsd=500"
 ```
 
 The full trace is also available to other agents over MCP, unpaid, as `omon_gate`.
+
+---
+
+## 10. Getting paid: x402 **and** B402
+
+**Both payment rails are implemented.** Not one rail with a second one mentioned in a
+roadmap — two complete implementations behind a single seam, selectable with one
+environment variable, each producing a real, correctly-shaped payment challenge.
+
+Both agents' output is sold behind a genuine HTTP `402 Payment Required`. An outside agent
+holding nothing but the URL can discover the service, read the price, pay in USDC, and
+receive the data. **No account. No API key. No signup form. No human.**
+
+```bash
+node scripts/pay.mjs /api/intel     # an outside client pays a real 402, end to end
+```
+
+### 10.1 x402 — live, and settled 14 times
+
+| | |
+|---|---|
+| Rail | x402, Base Sepolia, public facilitator |
+| Status | **Settling.** 14 on-chain payments received |
+| Sold over | HTTP (`/api/intel`, `/api/signals`) **and** MCP (`omon_intel`, `omon_signal`) |
+| Discovery | [`/.well-known/x402`](https://www.omon-ai.duckdns.org/.well-known/x402), no directory needed |
+
+Real settled transactions, from [`data/purchases.jsonl`](data/):
+
+| Transaction | Endpoint | Chain |
+|---|---|---|
+| `0xd887ac57917daf8aa2de7fd4e3a6742d171138aa76241715cf224da8a74aacbb` | `/api/intel` | Base Sepolia |
+| `0x37256ac5d4f504a5fef01e576c179b2b292e3f02108828fbe3e6244c285a59b8` | `/api/signals` | Base Sepolia |
+| `0x8cd75eea07a4d93b598e6ce60d714293696d23d73b511dc73da4d5517e6c26a7` | `/api/intel` | Base Sepolia |
+| `0xb580ba7dbc0b7c97ebd15f18c05095ec2af0f293dccea041d16341f87776aeaa` | `/api/signals` | Base Sepolia |
+| … | | **14 settled in total** |
+
+**An unpaid request is not a wall.** It returns the challenge *plus a redacted preview*
+built by [`src/lib/service.ts`](src/lib/service.ts) — the same function that feeds the
+manifest — so a buying agent can evaluate the product before spending, and the preview and
+the catalogue can never drift apart, because they are one function.
+
+### 10.2 B402 — Binance's own rail, mapped against the vendor SDK
+
+[`src/lib/b402.ts`](src/lib/b402.ts) maps Omon's payment challenge onto **Binance
+OnchainPay**, using `@bnb-chain/b402` — the provider's own package, not a reimplementation
+of it.
+
+| | |
+|---|---|
+| Provider | `@bnb-chain/b402` v0.2.1 |
+| Network | `eip155:56` — BNB Smart Chain |
+| Scheme | `exact` |
+| Transfer method | `eip3009` |
+| Pricing | **Atomic units**, converted by `toAtomicUnits()` with per-token decimals |
+| Published live | [`/api/b402`](https://www.omon-ai.duckdns.org/api/b402) — the exact challenge, byte for byte |
+| Tested | **25 offline assertions, against the provider's own parser** |
+
+Three rails, one seam, one environment variable:
+
+```text
+X402_RAIL=testnet        public facilitator, Base Sepolia.       Default.
+X402_RAIL=b402-preview   B402 challenge published + inspectable. No credentials needed.
+X402_RAIL=b402           B402 on BNB Smart Chain.
+```
+
+Routes never import a scheme or a facilitator directly — they import
+[`src/lib/x402.ts`](src/lib/x402.ts) and nothing else. **Swapping the money rail is one
+variable, not a refactor.**
+
+**The B402 mapping found a real bug in how the route was configured, and that bug is now a
+regression test against the vendor's own code.** `paidRoute()` was handing B402 the same
+`price: "$0.01"` string the public rail accepts — and `B402ExactServerScheme.parsePrice`
+rejects a monetary price outright without a `moneyParser`. `enhancePaymentRequirements`
+then demands `extra.assetTransferMethod`, `extra.name` and `extra.version`, none of which
+were being sent.
+
+The rail would have **booted perfectly clean and failed on the first paid request** — the
+worst possible shape for that class of bug, because credentials would have been blamed for
+what was actually a route-config gap.
+
+[`scripts/b402-test.ts`](scripts/b402-test.ts) now asserts that `parsePrice` **rejects** the
+old form and **accepts** what `b402Accepts()` builds. 25 assertions, fully offline, no
+credentials, running against the provider's real implementation:
+
+```bash
+npx tsx scripts/b402-test.ts     # 25 passed
+```
+
+**Preview mode keeps exactly one challenge payable, and that is a deliberate correctness
+property.** The tempting way to feature a second rail is to advertise a BSC challenge and
+quietly settle somewhere else — which hands a buyer a payment requirement it cannot pay, on
+a chain nothing is watching. Instead, preview publishes the B402 challenge **alongside** the
+one that settles, labelled `b402Preview`, and built by **the same `b402Accepts()` the live
+rail calls**. What you see in preview is byte for byte what a buyer gets on BSC.
+
+`settlementRail` is a separate export from `rail` for the same reason: nothing that reports
+where money actually landed can ever show "b402" over a figure that settled elsewhere.
+
+```bash
+curl -s https://www.omon-ai.duckdns.org/api/b402 | jq '.b402.wouldAdvertise'
+# the exact accepts entry, on eip155:56, eip3009, atomic units — built by the live code path
+```
+
+### 10.3 Why two rails
+
+The open rail proves the model works with no permission from anyone. The Binance rail is
+where an agent economy built on Agent OS would actually settle. **Building only the first is
+a protocol demo; building only the second is a vendor integration. Building both, behind one
+seam, with one variable between them, is the thing that survives either future.**
