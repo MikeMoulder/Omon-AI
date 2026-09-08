@@ -289,12 +289,40 @@ export function serviceManifest(args: {
     // Present whenever the B402 mapping is published, live or previewed, so an
     // agent can see the BSC requirements without a second request.
     ...(args.b402 ? { b402: args.b402 } : {}),
+    /**
+     * Omon's own MCP server.
+     *
+     * Published here because an agent that already speaks MCP should not have
+     * to be told twice: it finds this manifest looking for something to buy,
+     * and the same document says it can call the seller natively instead of
+     * learning a REST shape. The paid tools are the same two products sold over
+     * HTTP, at the same price, settled the same way.
+     */
+    mcp: {
+      transport: "streamable-http",
+      protocolVersion: "2025-06-18",
+      url: `${args.baseUrl}/api/mcp`,
+      tools: {
+        free: ["omon_rails", "omon_pnl", "omon_positions", "omon_gate"],
+        paid: ["omon_intel", "omon_signal"],
+      },
+      paymentErrorCode: -32002,
+      note:
+        "MCP has no native payment concept, so an unpaid call to a paid tool returns " +
+        "JSON-RPC error -32002 with the x402 challenge and a redacted preview in error.data. " +
+        "Resend with an X-PAYMENT header to collect the full result.",
+    },
     endpoints: ENDPOINTS.map((e) => ({ ...e, url: `${args.baseUrl}${e.path}` })),
     free: [
       { path: "/.well-known/x402", description: "This document." },
       { path: "/api/manifest", description: "This document, canonical path." },
       { path: "/api/intel/refresh", description: "Cache status (GET)." },
       { path: "/api/signals/refresh", description: "Signal cache status (GET)." },
+      {
+        path: "/api/mcp",
+        description:
+          "Omon's MCP server. GET describes it; POST speaks JSON-RPC. Four of its six tools are free.",
+      },
       {
         path: "/api/b402",
         description:
