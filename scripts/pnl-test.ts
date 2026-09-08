@@ -372,4 +372,56 @@ check("pre-futures rows with no venue read as spot", () => {
   assert.equal(v.futures.fillCount, 0);
 });
 
+console.log("\nthe hold clock");
+
+check("averaging in does not restart the clock", () => {
+  // The 2026-09-06..08 bug in miniature. Three buys into one symbol, the last
+  // one an hour ago. Dating the hold from the newest fill would report an hour
+  // held and no 6h time-stop would ever fire.
+  const p = computePnl(
+    [
+      fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 800, agoHours: 9 }),
+      fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 810, agoHours: 5 }),
+      fill({ symbol: "BTCUSDT", side: "BUY", qty: 0.01, quoteUsd: 820, agoHours: 1 }),
+    ],
+    { BTCUSDT: "81000" },
+  ).positions[0];
+
+  assert.equal(p.openedAt, new Date(base - 9 * HOUR).toISOString(), "clock runs from the first buy");
+  assert.equal(p.lastFillAt, new Date(base - 1 * HOUR).toISOString(), "lastFillAt still tracks the newest");
+});
+
+check("a re-entry after going flat starts a new clock", () => {
+  const p = computePnl(
+    [
+      fill({ symbol: "BNBUSDT", side: "BUY", qty: 0.1, quoteUsd: 75, agoHours: 9 }),
+      fill({ symbol: "BNBUSDT", side: "SELL", qty: 0.1, quoteUsd: 76, agoHours: 6 }),
+      fill({ symbol: "BNBUSDT", side: "BUY", qty: 0.1, quoteUsd: 77, agoHours: 2 }),
+    ],
+    { BNBUSDT: "780" },
+  ).positions[0];
+
+  assert.equal(p.openedAt, new Date(base - 2 * HOUR).toISOString(), "the old run's clock is not inherited");
+});
+
+check("adding to a perp does not restart its clock, but a flip does", () => {
+  const held = computeFuturesPnl(
+    [
+      perp({ symbol: "ETHUSDT", side: "SELL", qty: 0.01, price: 2500, agoHours: 8 }),
+      perp({ symbol: "ETHUSDT", side: "SELL", qty: 0.01, price: 2490, agoHours: 2 }),
+    ],
+    { ETHUSDT: "2480" },
+  ).positions[0];
+  assert.equal(held.openedAt, new Date(base - 8 * HOUR).toISOString(), "adding to a short keeps the clock");
+
+  const flipped = computeFuturesPnl(
+    [
+      perp({ symbol: "ETHUSDT", side: "SELL", qty: 0.01, price: 2500, agoHours: 8 }),
+      perp({ symbol: "ETHUSDT", side: "BUY", qty: 0.03, price: 2490, agoHours: 2 }),
+    ],
+    { ETHUSDT: "2480" },
+  ).positions[0];
+  assert.equal(flipped.openedAt, new Date(base - 2 * HOUR).toISOString(), "a reversal is a new position");
+});
+
 console.log(`\n${passed} passed\n`);

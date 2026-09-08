@@ -93,8 +93,21 @@ function pctOf(p: { unrealizedPct: number | null }): number | null {
     : p.unrealizedPct * 100;
 }
 
-function heldMsOf(lastFillAt: string, now: number): number {
-  const t = new Date(lastFillAt).getTime();
+/**
+ * How long the position now standing has been open.
+ *
+ * Measured from `openedAt` — the fill that took the symbol from flat to open —
+ * and NOT from `lastFillAt`. The difference is the whole time-stop.
+ *
+ * Dating the hold from the most recent fill means every top-up restarts the
+ * clock, so a position that is added to more often than the time-stop is long
+ * can never reach it. Measured on the 2026-09-06..08 run: median gap between
+ * BTCUSDT spot buys was 70 minutes and BNBUSDT 120, against a 6h time-stop. The
+ * result was 37 spot buys and one spot sell in 60 hours, and the one sell was
+ * ETHUSDT — the only symbol whose gaps ran long enough for the clock to finish.
+ */
+function heldMsOf(openedAt: string, now: number): number {
+  const t = new Date(openedAt).getTime();
   return Number.isFinite(t) ? Math.max(0, now - t) : 0;
 }
 
@@ -164,7 +177,7 @@ export function exitsFor(args: {
     if (p.markPrice === null || p.marketValueUsd === null) continue;
 
     const pct = pctOf(p);
-    const heldMs = heldMsOf(p.lastFillAt, args.now);
+    const heldMs = heldMsOf(p.openedAt, args.now);
     const hit = ruleFor(pct, heldMs, limits);
     if (!hit) continue;
 
@@ -187,7 +200,7 @@ export function exitsFor(args: {
     if (p.markPrice === null) continue;
 
     const pct = pctOf(p);
-    const heldMs = heldMsOf(p.lastFillAt, args.now);
+    const heldMs = heldMsOf(p.openedAt, args.now);
     const hit = ruleFor(pct, heldMs, limits);
     if (!hit) continue;
 
@@ -237,7 +250,7 @@ export function exitsFor(args: {
  * display concern and should never be able to affect the decision.
  */
 export function exitDistance(
-  p: { unrealizedPct: number | null; lastFillAt: string },
+  p: { unrealizedPct: number | null; openedAt: string },
   now: number,
   limits: ExitLimits = exitLimitsFromEnv(),
 ): { toTakeProfitPct: number | null; toStopLossPct: number | null; toTimeStopMs: number } {
@@ -245,6 +258,6 @@ export function exitDistance(
   return {
     toTakeProfitPct: pct === null ? null : limits.takeProfitPct - pct,
     toStopLossPct: pct === null ? null : pct + limits.stopLossPct,
-    toTimeStopMs: Math.max(0, limits.maxHoldMs - heldMsOf(p.lastFillAt, now)),
+    toTimeStopMs: Math.max(0, limits.maxHoldMs - heldMsOf(p.openedAt, now)),
   };
 }

@@ -35,6 +35,7 @@ function spot(over: Partial<Position> & { pct?: number | null; heldMs?: number }
     realizedUsd: 0,
     fills: 1,
     lastFillAt: agoMs(heldMs),
+    openedAt: agoMs(heldMs),
     ...rest,
   };
 }
@@ -56,6 +57,7 @@ function perp(over: Partial<PerpPosition> & { pct?: number | null; heldMs?: numb
     realizedUsd: 0,
     fills: 1,
     lastFillAt: agoMs(heldMs),
+    openedAt: agoMs(heldMs),
     ...rest,
   };
 }
@@ -249,21 +251,21 @@ check("a spot close is sized at market value, not cost basis", () => {
 console.log("\nexitDistance");
 
 check("reports the gap to each exit", () => {
-  const d = exitDistance({ unrealizedPct: 0.01, lastFillAt: agoMs(2 * HOUR) }, NOW, LIMITS);
+  const d = exitDistance({ unrealizedPct: 0.01, openedAt: agoMs(2 * HOUR) }, NOW, LIMITS);
   assert.equal(d.toTakeProfitPct?.toFixed(2), "1.50");
   assert.equal(d.toStopLossPct?.toFixed(2), "2.50");
   assert.equal(d.toTimeStopMs, 4 * HOUR);
 });
 
 check("an unpriced position has no percentage distances but still has a clock", () => {
-  const d = exitDistance({ unrealizedPct: null, lastFillAt: agoMs(HOUR) }, NOW, LIMITS);
+  const d = exitDistance({ unrealizedPct: null, openedAt: agoMs(HOUR) }, NOW, LIMITS);
   assert.equal(d.toTakeProfitPct, null);
   assert.equal(d.toStopLossPct, null);
   assert.equal(d.toTimeStopMs, 5 * HOUR);
 });
 
 check("the clock never reports negative time remaining", () => {
-  const d = exitDistance({ unrealizedPct: 0, lastFillAt: agoMs(99 * HOUR) }, NOW, LIMITS);
+  const d = exitDistance({ unrealizedPct: 0, openedAt: agoMs(99 * HOUR) }, NOW, LIMITS);
   assert.equal(d.toTimeStopMs, 0);
 });
 

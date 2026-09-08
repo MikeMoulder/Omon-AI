@@ -74,6 +74,11 @@ export type Position = {
   realizedUsd: number;
   fills: number;
   lastFillAt: string;
+  /**
+   * When this run of exposure began — the fill that took the symbol from flat
+   * to open, not the most recent one. What the time-stop measures against.
+   */
+  openedAt: string;
 };
 
 export type PnlSummary = {
@@ -108,6 +113,15 @@ type Pot = {
   realized: number;
   fills: number;
   lastFillAt: string;
+  /**
+   * When the CURRENT run of exposure began — the fill that took this symbol
+   * from flat to open. Reset every time the pot flattens, so a re-entry starts
+   * a new clock rather than inheriting the old one.
+   *
+   * Distinct from `lastFillAt` on purpose, and the distinction is what the
+   * time-stop runs on. See src/lib/exits.ts.
+   */
+  openedAt: string;
   unbased: number;
 };
 
@@ -137,12 +151,17 @@ export function computePnl(fills: Fill[], marks: Record<string, string> = {}): P
       realized: 0,
       fills: 0,
       lastFillAt: fill.createdAt,
+      openedAt: fill.createdAt,
       unbased: 0,
     };
     pot.fills += 1;
     pot.lastFillAt = fill.createdAt;
 
     if (fill.side === "BUY") {
+      // Flat to open starts the clock. Adding to a position that is already
+      // open does NOT — averaging in is not a new position, and treating it as
+      // one is what let a 6h time-stop never mature across 22 BTCUSDT buys.
+      if (pot.qty === 0) pot.openedAt = fill.createdAt;
       pot.qty += fill.qty;
       pot.cost += fill.quoteUsd;
     } else {
@@ -194,6 +213,7 @@ export function computePnl(fills: Fill[], marks: Record<string, string> = {}): P
     positions.push({
       symbol,
       qty: pot.qty,
+      openedAt: pot.openedAt,
       avgCostUsd: open ? pot.cost / pot.qty : 0,
       costBasisUsd: pot.cost,
       markPrice,
@@ -251,6 +271,8 @@ export type PerpPosition = {
   marginUsd: number;
   /** Leverage of the fills that opened the position now standing. */
   leverage: number;
+  /** See `Position.openedAt`. What the time-stop measures against. */
+  openedAt: string;
   markPrice: number | null;
   /** Signed open profit, or null when unpriced. */
   unrealizedUsd: number | null;
@@ -295,6 +317,8 @@ type Perp = {
   leverage: number;
   fills: number;
   lastFillAt: string;
+  /** See `Pot.openedAt`. Reset on flat AND on a flip — a reversed position is a new one. */
+  openedAt: string;
 };
 
 /** Below this, a residual perp position is float noise and reads as flat. */
@@ -330,6 +354,7 @@ export function computeFuturesPnl(
       leverage: fill.leverage ?? 1,
       fills: 0,
       lastFillAt: fill.createdAt,
+      openedAt: fill.createdAt,
     };
     pot.fills += 1;
     pot.lastFillAt = fill.createdAt;
@@ -338,6 +363,8 @@ export function computeFuturesPnl(
     const adding = pot.qty === 0 || Math.sign(pot.qty) === Math.sign(delta);
 
     if (adding) {
+      // Flat to open starts the clock; adding to a live position does not.
+      if (pot.qty === 0) pot.openedAt = fill.createdAt;
       // Volume-weighted entry. The leverage of the position becomes the
       // leverage of the fills currently holding it open.
       const total = Math.abs(pot.qty) + Math.abs(delta);
@@ -359,8 +386,10 @@ export function computeFuturesPnl(
         pot.entry = 0;
       } else if (flipped) {
         // The remainder is a brand new position in the other direction, and it
-        // was opened at this fill's price, not at the old entry.
+        // was opened at this fill's price, not at the old entry. Its clock
+        // starts here too, for exactly the same reason.
         pot.entry = fill.price;
+        pot.openedAt = fill.createdAt;
         if (fill.leverage) pot.leverage = fill.leverage;
       }
     }
@@ -412,6 +441,7 @@ export function computeFuturesPnl(
       realizedUsd: pot.realized,
       fills: pot.fills,
       lastFillAt: pot.lastFillAt,
+      openedAt: pot.openedAt,
     });
   }
 
