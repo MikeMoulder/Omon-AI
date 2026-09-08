@@ -462,10 +462,37 @@ export async function signalFromIntel(args: {
     SIGNAL_SCHEMA,
   );
 
-  // Futures only when this build has it. A model that ignores the instruction
-  // and asks for a venue that is off gets routed to spot rather than refused,
-  // because a smaller honest trade beats a beat that produced nothing.
-  const venue: Venue = perps && out.venue === "futures" ? "futures" : "spot";
+  // Futures only when this build has it, and only on a pair it can actually be
+  // filled on. A model that ignores either instruction gets routed to spot
+  // rather than refused, because a smaller honest trade beats a beat that
+  // produced nothing.
+  //
+  // The second half is not hypothetical. `futuresTradable` is the list the
+  // prompt hands over, and a pair missing from it is missing because its floor
+  // could not be read or does not fit under the per-trade cap — neither of
+  // which a futures order can be placed through.
+  const venue: Venue =
+    perps && out.venue === "futures" && futuresTradable.includes(out.symbol) ? "futures" : "spot";
+
+  // The size floor is per venue AND per symbol.
+  //
+  // A futures order below its symbol's exchange minimum cannot be filled, so
+  // this is the floor of the range the model was ASKED to size in — the prompt
+  // states it per symbol as a hard requirement — not a number invented after
+  // the fact. Clamping to it is the same repair the line below has always made
+  // for a size outside the band, with the floor the band actually has.
+  //
+  // Ignoring it was the single largest failure of the 2026-09-06..08 run: 133
+  // of 236 actions were BTCUSDT futures ideas sized at $10 or $15 against a $50
+  // minimum, refused by the gate every time.
+  //
+  // This is NOT the snap that src/lib/futures.ts deliberately refuses to do.
+  // That one runs after the gate has approved a number, and would put more on
+  // the exchange than the leash agreed to. This one runs before the gate, and
+  // the result is checked against the per-trade cap, the daily cap, the loss
+  // halt and the drawdown limit like any other proposal.
+  const sizeFloorHere =
+    venue === "futures" ? Math.max(sizeFloor, Math.ceil(minimums[out.symbol] ?? 0)) : sizeFloor;
 
   // The score for the symbol the model actually chose, resolved AFTER the call
   // because the symbol is an output. Undefined when the model names a pair that
@@ -491,7 +518,7 @@ export async function signalFromIntel(args: {
     // hardcoded 5..50 while the budget ceiling was 25, so the model's strongest
     // proposals were the ones guaranteed to be refused. Same reasoning as the
     // comment on sizeCeiling above: one number, one place.
-    sizeUsd: Math.min(sizeCeiling, Math.max(sizeFloor, out.sizeUsd)),
+    sizeUsd: Math.min(sizeCeiling, Math.max(sizeFloorHere, out.sizeUsd)),
     thesis: out.thesis,
     createdAt: now,
     ...(c
