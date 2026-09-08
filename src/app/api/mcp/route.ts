@@ -25,9 +25,10 @@
  *
  * MCP has no native concept of paying for a tool call, so the 402 rides in the
  * JSON-RPC error envelope under code -32002 with the challenge in `error.data`.
- * A caller that then attaches an `X-PAYMENT` header to its next POST gets the
- * full result — the header is forwarded verbatim to the HTTP route that already
- * knows how to settle it.
+ * A caller that then attaches a `payment-signature` header to its next POST gets
+ * the full result — the header is forwarded verbatim to the HTTP route that
+ * already knows how to settle it. (`x-payment`, the x402 v1 name, is forwarded
+ * too, so a client built against either version of the spec can buy.)
  */
 import { NextRequest, NextResponse } from "next/server";
 import {
@@ -113,11 +114,18 @@ async function proxyPaid(
   const limit = Number(args?.limit);
   if (Number.isFinite(limit) && limit > 0) url.searchParams.set("limit", String(limit));
 
-  const payment = request.headers.get("x-payment");
+  // x402 v2 signs with `payment-signature`. `x-payment` is the v1 name and is
+  // still accepted here, because a client built against either spec should be
+  // able to buy — and forwarding only the v1 name is exactly the bug that made
+  // every paid MCP call look unpaid no matter what the buyer sent.
+  const signature = request.headers.get("payment-signature");
+  const legacy = request.headers.get("x-payment");
+
   const res = await fetch(url, {
     headers: {
       accept: "application/json",
-      ...(payment ? { "x-payment": payment } : {}),
+      ...(signature ? { "payment-signature": signature } : {}),
+      ...(legacy ? { "x-payment": legacy } : {}),
     },
     cache: "no-store",
   });
@@ -140,18 +148,32 @@ async function proxyPaid(
   };
 }
 
+/**
+ * What `dispatch` hands the transport: the JSON-RPC envelope, plus how the HTTP
+ * layer should frame it.
+ *
+ * Almost everything is a 200. The exception is an unpaid paid tool, which is
+ * answered with a real HTTP 402 carrying the real `payment-required` header —
+ * see the note on `tools/call` below.
+ */
+type Dispatched = {
+  rpc: unknown;
+  status?: number;
+  headers?: Record<string, string>;
+};
+
 async function dispatch(request: NextRequest, message: {
   id?: JsonRpcId;
   method?: string;
   params?: Record<string, unknown>;
-}): Promise<unknown | null> {
+}): Promise<Dispatched | null> {
   const id = message.id ?? null;
   const method = message.method ?? "";
   const params = message.params ?? {};
 
   switch (method) {
     case "initialize":
-      return ok(id, {
+      return { rpc: ok(id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
@@ -160,7 +182,7 @@ async function dispatch(request: NextRequest, message: {
           "omon_rails, omon_pnl, omon_positions, omon_gate. Two cost one cent each over " +
           "x402: omon_intel and omon_signal. Calling a paid tool without payment returns " +
           "error -32002 carrying the challenge and a redacted preview.",
-      });
+      }) };
 
     // A notification has no id and takes no response at all. Returning one to a
     // strict client is a protocol violation, so this returns null and the
@@ -170,10 +192,10 @@ async function dispatch(request: NextRequest, message: {
       return null;
 
     case "ping":
-      return ok(id, {});
+      return { rpc: ok(id, {}) };
 
     case "tools/list":
-      return ok(id, { tools: toolDescriptors() });
+      return { rpc: ok(id, { tools: toolDescriptors() }) };
 
     case "tools/call": {
       const name = String(params.name ?? "");
@@ -181,18 +203,20 @@ async function dispatch(request: NextRequest, message: {
       const tool = toolByName(name);
 
       if (!tool) {
-        return err(id, -32602, `Unknown tool: ${name}`, {
-          available: toolDescriptors().map((t) => t.name),
-        });
+        return {
+          rpc: err(id, -32602, `Unknown tool: ${name}`, {
+            available: toolDescriptors().map((t) => t.name),
+          }),
+        };
       }
 
       if (!tool.paid) {
         try {
-          return ok(id, toolResult(callFreeTool(name, args)));
+          return { rpc: ok(id, toolResult(callFreeTool(name, args))) };
         } catch (e) {
           // A tool that throws is a result with isError set, not a transport
           // failure — the call reached the server and the server answered.
-          return ok(id, toolResult({ error: String(e) }, true));
+          return { rpc: ok(id, toolResult({ error: String(e) }, true)) };
         }
       }
 
@@ -203,7 +227,13 @@ async function dispatch(request: NextRequest, message: {
       );
 
       if (status === 402) {
-        return err(id, PAYMENT_REQUIRED, `${name} requires payment`, {
+        // A real HTTP 402 with the real challenge header, not just a JSON-RPC
+        // error. That is what lets an off-the-shelf x402 client pay this
+        // endpoint directly: it sees the status and the header it already knows
+        // how to handle, settles, and retries with X-PAYMENT — which the proxy
+        // above forwards untouched. A plain MCP client that ignores the status
+        // still finds the same information in the error envelope below.
+        const rpc = err(id, PAYMENT_REQUIRED, `${name} requires payment`, {
           // Whatever the 402 route said: price, disclosure and the redacted preview.
           ...(body as Record<string, unknown>),
           // The machine-readable half. `accepts[]` is what a client actually
@@ -213,30 +243,43 @@ async function dispatch(request: NextRequest, message: {
           paymentRequiredHeader: challengeHeader,
           payWith:
             "Build an x402 payment from paymentRequired.accepts, then POST this same " +
-            "tools/call again with the result in an X-PAYMENT header. Buying over HTTP " +
-            "at the path below settles identically and lands in the same ledger.",
+            "tools/call again with the result in a `payment-signature` header (x402 v2; " +
+            "`x-payment` is accepted for v1). Buying over HTTP at the path below settles " +
+            "identically and lands in the same ledger.",
           httpPath: tool.paid.path,
         });
+
+        return {
+          rpc,
+          status: 402,
+          ...(challengeHeader ? { headers: { "payment-required": challengeHeader } } : {}),
+        };
       }
 
       if (status !== 200) {
-        return ok(id, toolResult({ error: `upstream ${tool.paid.path} returned ${status}`, body }, true));
+        return {
+          rpc: ok(id, toolResult({ error: `upstream ${tool.paid.path} returned ${status}`, body }, true)),
+        };
       }
 
       // The receipt. A buyer that paid deserves its transaction hash back
-      // without having to go and look for it.
-      return ok(
-        id,
-        toolResult(
-          settlement
-            ? { ...(body as Record<string, unknown>), paymentResponse: settlement }
-            : body,
+      // without having to go and look for it, on the header an x402 client
+      // already reads as well as in the body.
+      return {
+        rpc: ok(
+          id,
+          toolResult(
+            settlement
+              ? { ...(body as Record<string, unknown>), paymentResponse: settlement }
+              : body,
+          ),
         ),
-      );
+        ...(settlement ? { headers: { "payment-response": settlement } } : {}),
+      };
     }
 
     default:
-      return err(id, -32601, `Method not found: ${method}`);
+      return { rpc: err(id, -32601, `Method not found: ${method}`) };
   }
 }
 
@@ -248,28 +291,29 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(err(null, -32700, "Parse error"), { status: 400 });
   }
 
-  const response = await dispatch(request, message);
+  const dispatched = await dispatch(request, message);
 
   // Notification: acknowledged, nothing to say.
-  if (response === null) return new NextResponse(null, { status: 202 });
+  if (dispatched === null) return new NextResponse(null, { status: 202 });
+
+  const { rpc, status = 200, headers = {} } = dispatched;
+  const common = {
+    "cache-control": "no-store",
+    "mcp-protocol-version": PROTOCOL_VERSION,
+    ...headers,
+  };
 
   // The client decides the framing. Omon's own client parses both, so both are
   // served rather than picking one and hoping.
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("text/event-stream")) {
-    const body = `event: message\ndata: ${JSON.stringify(response)}\n\n`;
-    return new NextResponse(body, {
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-store",
-        connection: "keep-alive",
-      },
+    return new NextResponse(`event: message\ndata: ${JSON.stringify(rpc)}\n\n`, {
+      status,
+      headers: { ...common, "content-type": "text/event-stream", connection: "keep-alive" },
     });
   }
 
-  return NextResponse.json(response, {
-    headers: { "cache-control": "no-store", "mcp-protocol-version": PROTOCOL_VERSION },
-  });
+  return NextResponse.json(rpc, { status, headers: common });
 }
 
 /**
