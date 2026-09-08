@@ -78,3 +78,22 @@ npx tsx scripts/futures-test.ts && npx tsx scripts/store-test.ts
 | 15 | [Where this goes](#15-where-this-goes) | The economic object this is a datapoint for |
 
 ---
+
+## 1. The problem
+
+An agent that trades needs three things: market data it can trust, a venue that will
+execute, and money.
+
+Binance Agent OS now answers the first two properly. Nothing answers the third. An
+autonomous agent has no way to **earn**, so every agent at every hackathon on earth is the
+same economic object: **a cost centre with a private key**, burning down a balance some
+human topped up, producing analysis that dies in a log file the moment the demo ends.
+
+Omon inverts that. It reads Binance markets through Agent OS, forms a view, trades that
+view on real matching engines, and then **sells the view it just formed** — to any other
+agent on the internet, for one cent, over an open protocol, with no account, no API key,
+no signup form and no human in the loop on either side.
+
+The analysis is not the by-product of the trading. **The analysis is the second product.**
+The same conviction score that sizes Omon's own position is the thing another agent pays
+for, and the payment lands on chain in the same beat.
