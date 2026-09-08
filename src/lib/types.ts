@@ -90,10 +90,31 @@ export type Signal = {
   convictionReasons?: string[];
 };
 
+/**
+ * One numbered check in the budget gate, and what it did with this trade.
+ *
+ * `skip` is deliberately distinct from `pass`. A futures-only check on a spot
+ * order did not approve anything, and a console that renders the two the same
+ * way tells a viewer the gate is doing more work than it is.
+ */
+export type GateCheck = {
+  n: number;
+  name: string;
+  status: "pass" | "fail" | "skip";
+  detail?: string;
+};
+
 export type Decision = {
   decision: "ALLOW" | "BLOCK" | "REQUIRE_APPROVAL";
   reason: string;
   remainingUsd: number;
+  /**
+   * Every check the gate ran, in the order it ran them, ending at the one that
+   * decided. The gate short-circuits, so a BLOCK trace stops at the failure —
+   * which is the point: it names the most fundamental thing wrong rather than
+   * whichever rule happened to run last.
+   */
+  checks: GateCheck[];
 };
 
 export type Purchase = {

@@ -23,7 +23,7 @@
  * the $20, so "$100 a day" means the same sentence on both venues and leverage
  * cannot quietly multiply it. Margin is reported alongside, never instead.
  */
-import type { Decision, Venue } from "@/lib/types";
+import type { Decision, GateCheck, Venue } from "@/lib/types";
 import { MIN_NOTIONAL_USD } from "@/lib/exchange";
 import { MAX_LEVERAGE, futuresEnabled } from "@/lib/futures";
 
@@ -141,32 +141,62 @@ export function evaluateTrade(args: {
   const side = args.side ?? "BUY";
   const closing = isClosing({ venue, side, reduceOnly: args.reduceOnly });
 
-  const block = (reason: string): Decision => ({ decision: "BLOCK", reason, remainingUsd });
+  // The trace. Numbers come from position rather than being hardcoded, so a
+  // check inserted in the middle renumbers everything after it automatically
+  // and the console never shows a gap. Skips are recorded, not dropped, which
+  // is what keeps the numbering identical across every trade.
+  const checks: GateCheck[] = [];
+  const next = () => checks.length + 1;
+
+  /** This check let the trade through. */
+  const pass = (name: string, detail?: string): void => {
+    checks.push({ n: next(), name, status: "pass", ...(detail ? { detail } : {}) });
+  };
+
+  /** This check did not apply — a futures rule on a spot order, say. */
+  const skip = (name: string, detail: string): void => {
+    checks.push({ n: next(), name, status: "skip", detail });
+  };
+
+  /** This check refused. Records it and returns the refusal. */
+  const block = (name: string, reason: string): Decision => {
+    checks.push({ n: next(), name, status: "fail", detail: reason });
+    return { decision: "BLOCK", reason, remainingUsd, checks };
+  };
 
   // A model can emit NaN, Infinity, a negative, or a string that coerced badly.
   if (!Number.isFinite(args.sizeUsd) || args.sizeUsd <= 0) {
-    return block(`size ${String(args.sizeUsd)} is not a positive number`);
+    return block("size is a positive number", `size ${String(args.sizeUsd)} is not a positive number`);
   }
+  pass("size is a positive number", `$${args.sizeUsd.toFixed(2)}`);
 
   if (!limits.allowedSymbols.includes(symbol)) {
-    return block(`${symbol || "(no symbol)"} is not on the allowlist`);
+    return block("symbol is on the allowlist", `${symbol || "(no symbol)"} is not on the allowlist`);
   }
+  pass("symbol is on the allowlist", symbol);
 
   // Venue gate before anything venue-specific, so a futures order on a build
   // with futures switched off is refused for the reason it was actually
   // refused, rather than passing every check and failing at the exchange.
   if (venue === "futures" && !futuresEnabled()) {
-    return block("futures is switched off: set FUTURES_ENABLED=1");
+    return block("venue is enabled", "futures is switched off: set FUTURES_ENABLED=1");
   }
+  pass("venue is enabled", venue);
 
   if (venue === "futures") {
     const leverage = args.leverage ?? 1;
     if (!Number.isFinite(leverage) || leverage < 1) {
-      return block(`leverage ${String(args.leverage)} is not a valid multiplier`);
+      return block("leverage within ceiling", `leverage ${String(args.leverage)} is not a valid multiplier`);
     }
     if (leverage > limits.maxLeverage) {
-      return block(`${leverage}x exceeds the ${limits.maxLeverage}x leverage ceiling`);
+      return block(
+        "leverage within ceiling",
+        `${leverage}x exceeds the ${limits.maxLeverage}x leverage ceiling`,
+      );
     }
+    pass("leverage within ceiling", `${leverage}x of ${limits.maxLeverage}x`);
+  } else {
+    skip("leverage within ceiling", "spot does not lever");
   }
 
   // Spot cannot borrow. Selling more than is held is not a short, it is an
@@ -174,14 +204,21 @@ export function evaluateTrade(args: {
   if (venue === "spot" && side === "SELL") {
     const held = args.holdingUsd;
     if (held === undefined || !Number.isFinite(held) || held <= 0) {
-      return block(`nothing to sell: Omon holds no ${symbol.replace("USDT", "")} of its own`);
+      return block(
+        "spot sell is covered",
+        `nothing to sell: Omon holds no ${symbol.replace("USDT", "")} of its own`,
+      );
     }
     if (args.sizeUsd > held) {
       return block(
+        "spot sell is covered",
         `$${args.sizeUsd.toFixed(2)} is more ${symbol.replace("USDT", "")} than Omon holds ` +
           `($${held.toFixed(2)} worth)`,
       );
     }
+    pass("spot sell is covered", `$${held.toFixed(2)} held`);
+  } else {
+    skip("spot sell is covered", venue === "futures" ? "futures can short" : "not a sell");
   }
 
   const floor = Math.max(MIN_NOTIONAL_USD, args.minNotionalUsd ?? 0);
@@ -193,40 +230,60 @@ export function evaluateTrade(args: {
   // "raise the cap or drop the symbol" is more use than "try a bigger number".
   if (floor > limits.maxTradeUsd) {
     return block(
+      "symbol is tradable at this cap",
       `${symbol} needs $${floor.toFixed(2)} minimum on ${venue}, above the ` +
         `$${limits.maxTradeUsd} per-trade cap`,
     );
   }
+  pass("symbol is tradable at this cap", `floor $${floor.toFixed(2)} <= cap $${limits.maxTradeUsd}`);
 
   if (args.sizeUsd < floor) {
     return block(
+      "size meets the symbol minimum",
       `$${args.sizeUsd.toFixed(2)} is below the $${floor.toFixed(2)} minimum for ${symbol}` +
         (venue === "futures" ? " on futures" : ""),
     );
   }
+  pass("size meets the symbol minimum", `$${floor.toFixed(2)} floor`);
 
   if (args.sizeUsd > limits.maxTradeUsd) {
     return block(
+      "size within per-trade cap",
       `$${args.sizeUsd.toFixed(2)} exceeds the $${limits.maxTradeUsd} per-trade cap`,
     );
   }
+  pass("size within per-trade cap", `$${limits.maxTradeUsd} cap`);
 
   // See the header: closes are exempt. An agent that cannot exit because it hit
   // its own spending cap is in a worse position than one that never traded.
   if (!closing && spent + args.sizeUsd > limits.dailyTradeUsd) {
     return block(
+      "within daily spend cap",
       `$${args.sizeUsd.toFixed(2)} would exceed the $${limits.dailyTradeUsd} daily cap ` +
         `($${remainingUsd.toFixed(2)} left)`,
     );
   }
+  if (closing) {
+    skip("within daily spend cap", "closes are exempt");
+  } else {
+    pass("within daily spend cap", `$${remainingUsd.toFixed(2)} of $${limits.dailyTradeUsd} left`);
+  }
 
   if (args.sizeUsd > limits.requireApprovalAboveUsd) {
+    checks.push({
+      n: next(),
+      name: "within auto-approve threshold",
+      status: "fail",
+      detail: `above $${limits.requireApprovalAboveUsd}`,
+    });
     return {
       decision: "REQUIRE_APPROVAL",
       reason: `$${args.sizeUsd.toFixed(2)} is above the $${limits.requireApprovalAboveUsd} auto-approve threshold`,
       remainingUsd,
+      checks,
     };
   }
+  pass("within auto-approve threshold", `$${limits.requireApprovalAboveUsd} threshold`);
 
   const margin =
     venue === "futures" && (args.leverage ?? 1) > 1
@@ -238,6 +295,7 @@ export function evaluateTrade(args: {
       decision: "ALLOW",
       reason: `closing trade, exempt from the daily cap${margin}`,
       remainingUsd,
+      checks,
     };
   }
 
@@ -245,6 +303,7 @@ export function evaluateTrade(args: {
     decision: "ALLOW",
     reason: `within limits: $${remainingUsd.toFixed(2)} of today's $${limits.dailyTradeUsd} remaining${margin}`,
     remainingUsd,
+    checks,
   };
 }
 
