@@ -95,7 +95,7 @@ export const PRODUCTS: ProductReach[] = [
     testnet: "refused",
     prod: "auth",
     loadBearing: false,
-    note: "Account status and key permissions. A read-only custody surface is not reachable without production credentials.",
+    note: "Account status and key permissions. Reads that move nothing still need production credentials, so there is no free custody surface. @binance/agentic-wallet is the other route and wants an interactive device-link flow a headless host cannot complete.",
   },
 ];
 

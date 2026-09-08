@@ -473,8 +473,17 @@ override reaches past it.
 1. **Spot and futures accept demo and testnet.** That is why those are the two venues
    Omon trades, and it is the mechanism behind "$0 of real money" in [section 1](#1-what-is-real-and-what-is-not)
    — not restraint, an actual supported path.
-2. **A read-only wallet or custody surface is not reachable off production.** Omon has
-   no custody panel for this reason, and would need production credentials to get one.
+2. **A read-only wallet or custody surface is not reachable off production.** This one
+   is worth stating plainly, because custody is something Agent OS actively sells. There
+   is no free tier of it: `binance-cli wallet` refuses `demo` and `testnet` like the
+   other two, so even `account-status` and `get-api-key-permission` — reads that move
+   nothing and could not move anything — need production credentials on a real account.
+   `@binance/agentic-wallet` (v1.9.0, real and current) is the other route, and its
+   dependency set (`keytar`, `qrcode`, `open`) points at an interactive device-link
+   flow, which a headless VPS cannot complete unattended. **So Omon has no custody
+   panel.** Not an oversight and not a shortcut: the cheapest honest path to one costs a
+   funded production account, and this project's entire premise is that an individual
+   developer should not need one.
 3. **Track B's third task cannot be completed without a funded production account.**
    The task list is spot, futures, and margin-or-convert; neither Convert nor Margin has
    a non-production path in Binance's own official CLI. Omon does spot and futures and
