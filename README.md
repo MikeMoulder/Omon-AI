@@ -154,3 +154,74 @@ model-free code standing between all of it and money.
 
 Every box above is running unattended on a public origin as you read this. The console
 draws a live countdown to the next beat, so nobody has to take that on faith.
+
+---
+
+## 3. Binance Agent OS: seven surfaces
+
+This is what the hackathon is about, so it is the longest part of this document, and every
+claim in it ends at a file path you can open or a URL you can curl.
+
+**Agent OS is not a logo on this project. It is the data path.** Seven Binance surfaces are
+wired in. They carry every market read the strategy runs on, every order the agent places,
+the payment rail it can bill on, the discovery document other agents find it through, and
+the protocol it both speaks and serves.
+
+### 3.1 The seven surfaces
+
+| # | Agent OS surface | What Omon does with it | Where in the code |
+|---|---|---|---|
+| 1 | **Binance MCP Server** `agent.binance.com/mcp/agentic` | Full hand-rolled MCP client: `spot_tickerPrice`, `spot_klines`, `spot_getAccount`. OAuth 2.1 + PKCE + CIMD, complete | [`src/lib/mcp.ts`](src/lib/mcp.ts) · 563 lines |
+| 2 | **Binance Skill Hub** `binance-cli 2.1.1` | `spot ticker-price`, `spot klines` — the candles the entire strategy computes on, batched 3.3× | [`src/lib/skillhub.ts`](src/lib/skillhub.ts) |
+| 3 | **Binance Exchange API**, Spot Demo Mode | Order execution, balances, exchange filters. **39 fills** | [`src/lib/exchange.ts`](src/lib/exchange.ts) |
+| 4 | **Binance USDⓈ-M Futures** | Perpetuals, leverage, signed positions, `reduceOnly` closes. **15 fills** | [`src/lib/futures.ts`](src/lib/futures.ts) · 710 lines |
+| 5 | **Binance Pay / OnchainPay — B402** `@bnb-chain/b402` | The BSC payment rail, mapped against the vendor SDK, published, **25 assertions** | [`src/lib/b402.ts`](src/lib/b402.ts) |
+| 6 | **Agent OS discovery conventions** | Publishing, machine-readably, which surface served every single read | [`src/lib/service.ts`](src/lib/service.ts) |
+| 7 | **MCP — as a server** | Omon serving **its own six tools** to other agents over the same protocol it reads Binance with. Two of them paid | [`src/lib/mcp-server.ts`](src/lib/mcp-server.ts) |
+
+Surface 7 is the one that changes what this project *is*. Everything from 1 to 6 makes Omon
+an Agent OS **consumer**. Serving MCP makes it something other agents can **build on** —
+which is the direction the platform is actually pointing, and it is the difference between
+using a platform and extending it.
+
+### 3.2 The three-rail read stack
+
+Market reads in Omon are not wired to one vendor call. They are a **stack of three
+independent rails, tried in strict order, with every fall-through recorded and published**.
+
+```ts
+// src/lib/exchange.ts — getPrices() and getCandles(), simplified
+if (mcpEnabled()) {
+  try   { ...; noteMcpUse("prices", { via: "mcp", tool: "spot_tickerPrice" }); return }
+  catch { noteMcpUse("prices", { via: "rest", reason: String(err) }) }
+}
+if (cliEnabled()) {
+  try   { ...; noteMcpUse("prices", { via: "cli", tool: "spot ticker-price" }); return }
+  catch { noteMcpUse("prices", { via: "rest", reason: String(err) }) }
+}
+noteMcpUse("prices", { via: "rest", reason: `${mcpOffReason()}; ${cliMode().reason}` });
+```
+
+| Rail | Surface | Credentials needed | Role |
+|---|---|---|---|
+| 1 | Binance MCP Server | OAuth 2.1 | Preferred. Takes over the read stack the moment a token exists, with no other code change |
+| 2 | Binance Skill Hub CLI | **None** for market data | Serving today, on the deployed origin, right now |
+| 3 | Plain REST + HMAC | Demo Mode keys | The floor. Keeps the heartbeat alive if both rails above are down |
+
+**`noteMcpUse()` is the load-bearing part of that design, not the fallback.** A silent
+fallback is an integration that has quietly stopped existing, and it is the single most
+common way a hackathon "integration" turns out to be a dead import nobody re-checked after
+day one.
+
+So every read in this system stamps `via: "mcp" | "cli" | "rest"` plus a reason;
+[`GET /api/agent-os`](https://www.omon-ai.duckdns.org/api/agent-os) publishes that stamp
+live; the console draws it as a status pill with the mode written on it in words; and two
+smoke scripts **fail on purpose** if the data turns out to have arrived over plain REST:
+
+```bash
+npx tsx scripts/skillhub-smoke.ts --verbose   # PASS only if an Agent OS rail served it
+npx tsx scripts/mcp-smoke.ts --verbose        # fails loudly on a silent REST fallback
+```
+
+Very few projects can tell you which rail served a given number. This one tells you on
+every request, forever, without being asked.
