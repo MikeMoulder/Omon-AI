@@ -340,3 +340,86 @@ agent on the other end of `/api/mcp` never touches Binance, never holds a key, a
 runs an indicator — it pays one cent and receives a conviction score computed on Binance
 Agent OS candles. That is the platform compounding, and it is the whole reason MCP is worth
 implementing twice.
+
+---
+
+## 5. The Skill Hub rail, and the traps inside it
+
+[`binance-cli`](https://github.com/binance/binance-cli), the Skill Hub CLI, is official
+Binance, needs **no credentials whatsoever** for market data, and is the rail an
+unaffiliated developer can actually reach. Installed on the box as `binance-cli 2.1.1`,
+from the official release tarball, **sha256-verified against the published checksum**
+rather than piping an installer script into a root shell.
+
+```bash
+binance-cli spot ticker-price --symbol BNBUSDT
+# {"symbol":"BNBUSDT","price":"773.76000000"}
+
+binance-cli spot klines --symbol BTCUSDT --interval 1h --limit 200
+# the identical array-of-arrays shape /api/v3/klines returns
+```
+
+That last property is why this rail took hours and not days: **the Skill Hub returns the
+same candle shape as the REST endpoint**, so `decodeKlines()` parsed it unchanged and the
+new rail dropped into an existing seam instead of forcing a rewrite. The seam discipline
+from day one paid for itself the first day it was tested.
+
+**Four engineering findings in [`src/lib/skillhub.ts`](src/lib/skillhub.ts) worth naming**,
+because each one costs an unwarned developer about an hour:
+
+| Finding | Why it matters |
+|---|---|
+| **`spawn` with `stdio: ["ignore","pipe","pipe"]`, never `exec`** | `exec` and `execFile` leave the child's stdin an open unwritten pipe, and `binance-cli` **blocks reading it**. The process hangs forever, with no output and no error. Nothing in the docs warns you |
+| **Binary resolution cached, with a 30s miss TTL** | `cliMode()` is read on every price call, so stat-ing `PATH` each time is pure waste — but caching the *miss* permanently would mean a CLI installed while the process runs needs a restart to be noticed. The TTL is the deliberate compromise |
+| **Batched reads: 3.3× measured** | `--symbols` fails in every documented form; `--json '{"symbols":[...]}'` works. On this rail the cost is process spawn, not network, so batching is real wall-clock time: **three symbols, 1.96s looped versus 0.60s batched** |
+| **The `-1100` trap has two causes and one message** | Mapped in full below |
+
+**The `symbols` trap, fully reverse-engineered**, because the error message actively lies
+about its cause. Binance's server-side regex is a Java character-class intersection that
+reads "word characters EXCEPT lowercase":
+
+```text
+["BTCUSDT","BNBUSDT"]      OK
+["BTCUSDT", "BNBUSDT"]     -1100  Illegal characters   <- ONE SPACE after the comma
+["btcusdt","bnbusdt"]      -1100  Illegal characters   <- lowercase. IDENTICAL error
+```
+
+Two completely different causes, one indistinguishable message. `cliPrices()` upper-cases
+defensively for exactly that reason. **The same trap then behaves differently on each of
+the three rails**, and it is mapped per rail in the code comments — on the MCP rail
+batching is *impossible*, because the MCP layer serialises the array itself and inserts the
+fatal space, so that rail must loop one symbol per call.
+
+**What this rail makes true:** the OHLCV candles that
+[`src/lib/indicators.ts`](src/lib/indicators.ts) and
+[`src/lib/strategy.ts`](src/lib/strategy.ts) compute EMA, ATR, RSI and breakout structure
+on are fetched **through Binance Agent OS, for real, with no token, on the deployed origin,
+right now** — and `/api/agent-os` will tell you so on request.
+
+### 5.1 What the Agent OS data actually does
+
+Agent OS is not decorating a price label on a screen here. The `spot_klines` payload is the
+direct input to a real technical engine:
+
+| Layer | File | What it computes |
+|---|---|---|
+| Indicators | [`src/lib/indicators.ts`](src/lib/indicators.ts) | EMA, ATR, RSI, prior range. Pure math, no network, no state |
+| Strategy | [`src/lib/strategy.ts`](src/lib/strategy.ts) | Trend regime, breakout structure, and a **conviction score** measuring how far the news and the chart agree |
+| Signal | [`src/lib/llm.ts`](src/lib/llm.ts) | The Signal Agent, handed both halves, sizes the trade inside the true ceiling |
+
+The indicator port is **cross-checked against the reference implementation bar for bar over
+19,980 bars** by [`scripts/indicators-test.ts`](scripts/indicators-test.ts). Not spot-checked
+— every bar.
+
+A conviction line from a live beat, straight off the running origin:
+
+```text
+BNBUSDT BUY $20  conviction 0.85 (high)
+  news  +0.75  (bullish @ 0.75)
+  chart +0.56  (up regime, price +7.9% vs EMA200)
+  no breakout: 1.8% below the 10-bar high
+  volatility 0.97% ATR, RSI 70
+  news and chart AGREE
+```
+
+Every number on the chart half of that came off Binance Agent OS.
