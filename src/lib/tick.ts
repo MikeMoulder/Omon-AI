@@ -41,7 +41,7 @@ import type { Decision, OrderResult, Signal, Venue } from "@/lib/types";
 import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { getPrices, placeOrder } from "@/lib/exchange";
 import { futuresMark, futuresMinNotional, placeFuturesOrder, placeableNotional } from "@/lib/futures";
-import { computeFuturesPnl, computePnl } from "@/lib/pnl";
+import { computeFuturesPnl, computePnl, drawdownUsd, realizedPnlWindowUsd } from "@/lib/pnl";
 import { refreshIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { refreshSignals, signalCacheStatus } from "@/lib/signal-cache";
 import { fills, hasTradedSignal, recordAction, recordFill, spentTodayUsd } from "@/lib/ledger";
@@ -133,10 +133,27 @@ export function tickRunning(): boolean {
 async function positionFor(
   symbol: string,
   venue: Venue,
-): Promise<{ holdingUsd: number | undefined; perpQty: number; minNotionalUsd: number | undefined }> {
+): Promise<{
+  holdingUsd: number | undefined;
+  perpQty: number;
+  minNotionalUsd: number | undefined;
+  marks: Record<string, string>;
+  /**
+   * When the mark used below was read, or undefined if the read failed.
+   *
+   * Within one beat this is near-zero by construction, and that is the point:
+   * the gate's freshness check should normally pass. It earns its keep on a slow
+   * beat — `futuresMinNotional()` and the sizing snap both await between this
+   * read and the gate call — and the day someone puts a cache in front of
+   * `getPrices()`. A guard that currently passes is still doing work.
+   */
+  pricedAt: number | undefined;
+}> {
   let marks: Record<string, string> = {};
+  let pricedAt: number | undefined;
   try {
     marks = await getPrices([symbol]);
+    pricedAt = Date.now();
   } catch (err) {
     console.warn(`[tick] could not price ${symbol}:`, err);
   }
@@ -156,11 +173,17 @@ async function positionFor(
       // Unknown floor sizes optimistically. A refused order is visible; an
       // order suppressed by a guess is not.
     }
-    return { holdingUsd: perp?.notionalUsd, perpQty: perp?.qty ?? 0, minNotionalUsd };
+    return { holdingUsd: perp?.notionalUsd, perpQty: perp?.qty ?? 0, minNotionalUsd, marks, pricedAt };
   }
 
   const spot = computePnl(rows, marks).positions.find((p) => p.symbol === symbol);
-  return { holdingUsd: spot?.marketValueUsd ?? undefined, perpQty: 0, minNotionalUsd: undefined };
+  return {
+    holdingUsd: spot?.marketValueUsd ?? undefined,
+    perpQty: 0,
+    minNotionalUsd: undefined,
+    marks,
+    pricedAt,
+  };
 }
 
 async function beat(opts: {
@@ -272,6 +295,13 @@ async function beat(opts: {
     }
   }
 
+  // The two ledger-wide risk numbers. Both fold the same fill log the console
+  // renders, so a halt the gate reports is a halt a viewer can already see the
+  // cause of, and neither can disagree with the headline P&L.
+  const ledger = fills();
+  const realizedPnl24hUsd = realizedPnlWindowUsd(ledger);
+  const drawdown = drawdownUsd(ledger, position.marks);
+
   const decision = evaluateTrade({
     symbol: signal.symbol,
     sizeUsd,
@@ -282,6 +312,12 @@ async function beat(opts: {
     reduceOnly,
     holdingUsd: position.holdingUsd,
     minNotionalUsd: position.minNotionalUsd,
+    // How old the mark backing this size is. Undefined when the price read
+    // failed, which skips the check rather than claiming a freshness the beat
+    // cannot vouch for.
+    quoteAgeMs: position.pricedAt === undefined ? undefined : Date.now() - position.pricedAt,
+    realizedPnl24hUsd,
+    drawdownUsd: drawdown,
   });
 
   const payload = {
