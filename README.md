@@ -841,3 +841,158 @@ The open rail proves the model works with no permission from anyone. The Binance
 where an agent economy built on Agent OS would actually settle. **Building only the first is
 a protocol demo; building only the second is a vendor integration. Building both, behind one
 seam, with one variable between them, is the thing that survives either future.**
+
+---
+
+## 11. Engineering highlights: the five bugs worth your time
+
+Not a feature list. These are the five findings that **changed the architecture**, and four
+of them were money bugs that a demo would never have surfaced because a demo never runs long
+enough.
+
+### 1. The scheduler was enforcing the daily cap twice, independently
+
+`src/instrumentation.ts` is bundled into a **separate module graph** from the route
+handlers, so anything it imports from `@/lib` is a *different instance* — its own ledger,
+its own caches, its own budget arithmetic. The first heartbeat called `runTick()` directly.
+
+Observed live: a scheduled beat **filled a real order** while every route still reported
+`actionCount: 0`, and the scheduler's `spentTodayUsd()` read its own empty ledger. **Real
+exposure was twice the configured limit**, and nothing on screen showed it.
+
+The fix is a rule, not a patch: instrumentation holds a timer and a `fetch`, and nothing
+else. It calls its own `POST /api/cron/tick` over loopback, so all state stays in one graph
+and the heartbeat behaves identically to an external cron would.
+
+### 2. One signal was traded once per beat, not once
+
+The signal cache serves the same newest row for its whole TTL, so consecutive beats inside
+that window each placed another order off it. Observed: two beats a minute apart both filled
+BUY BTCUSDT off a single signal. **A quiet news hour would have re-bought one stale idea
+until the daily cap was gone.**
+
+`ledger.hasTradedSignal()` now gates it, derived from the action rows rather than a second
+counter — so only orders that actually reached the exchange count, and the guard cannot
+drift from reality.
+
+### 3. The Signal Agent was told to propose sizes the gate would always refuse
+
+The prompt said "between 5 and 50" as a hard-coded literal while `BUDGET_MAX_TRADE_USD` was
+25 — and the very next line told the model to size **up** on agreement. So the **strongest**
+signals were precisely the ones guaranteed to be refused, while the intel feed looked
+perfectly healthy. A full day could run with zero fills and nothing obviously wrong on
+screen.
+
+The ceiling is now derived from `limitsFromEnv()`, so the two numbers cannot drift apart
+again. One source, three consumers.
+
+### 4. Restarting the process was a way to refill the budget
+
+Every piece of state was in memory. `pm2 restart` reset the ledger, the P&L, both caches and
+the beat counter — which meant a restart handed the agent **a fresh daily allowance**, let
+it re-trade an idea it had already bought, and re-paid the model for headlines it had
+already analysed.
+
+[`src/lib/store.ts`](src/lib/store.ts) is the fix: append-only JSONL for the ledger and
+fills, whole-document JSON written to a temp file and atomically renamed for the caches.
+
+**Appends are synchronous on purpose.** The failure being defended against is the process
+dying between "Binance filled the order" and "the row reached the disk", and a lost fill
+leaves an open position with no cost basis — a position the agent does not know it holds.
+
+Verified by **`SIGKILL`, not a graceful restart**, with
+[`scripts/store-test.ts`](scripts/store-test.ts) spawning real second processes. That
+detail matters: an earlier version of that test faked a restart by clearing the module
+cache, and **would have passed with persistence removed entirely**.
+
+### 5. There was no P&L, and there could not have been
+
+`recordAction()` stored what the budget layer *decided*, and the order came back with
+`executedQty` and `cummulativeQuoteQty` which were used for one console line and then
+dropped on the floor. No price meant no position, which meant no profit.
+
+[`src/lib/pnl.ts`](src/lib/pnl.ts) now derives positions and profit from fills, with three
+decisions worth not re-litigating:
+
+- **Average cost rather than FIFO**, so a viewer can check the arithmetic by hand.
+- **Selling what this ledger never bought earns nothing.** Pre-funded BNB has no cost basis
+  here, so it goes into `unbasedSells` with an amber note rather than fabricating profit out
+  of a balance the agent did not create.
+- **An open position with no mark is excluded and named**, because a missing price must read
+  as *missing* and never as a zero that looks like a loss.
+
+**P&L is never netted against x402 revenue.** Different rails — USDC on Base Sepolia in,
+demo USDT out — and one combined figure would imply a settlement between them that does not
+exist. Two cards, side by side, each labelled with its own rail.
+
+---
+
+## 12. Quick start
+
+Nothing here requires funding. Market reads need no credentials, Demo Mode is free, and
+every seam falls back to recorded fixtures and **says so on screen** rather than pretending.
+
+```bash
+git clone https://github.com/MikeMoulder/Omon-AI && cd Omon-AI
+npm install
+cp .env.example .env.local      # fill in what you have. every seam has a fallback
+npm run dev                     # http://localhost:3000
+```
+
+Then, in another shell:
+
+```bash
+curl -X POST 'localhost:3000/api/intel/refresh?force=1'   # fill the cache
+curl localhost:3000/api/agent-os | jq .                   # which rails are live for you
+curl -X POST localhost:3000/api/cron/tick                 # run one beat by hand
+```
+
+**To light up the live Binance Agent OS read rail** (optional, free, no credentials):
+
+```bash
+# install binance-cli from github.com/binance/binance-cli, then:
+npx tsx scripts/skillhub-smoke.ts --verbose     # prices + candles, via: cli
+```
+
+**To talk to Omon as an MCP server**, from any MCP client:
+
+```json
+{ "mcpServers": { "omon": { "type": "http",
+    "url": "https://www.omon-ai.duckdns.org/api/mcp" } } }
+```
+
+**The keys, and what each is for.** All 38 are documented in
+[`.env.example`](.env.example) with empty values. The four that change behaviour most:
+
+| Key | Needed for | Without it |
+|---|---|---|
+| `GEMINI_API_KEY` | Both agents | Fixture intel and signals, labelled as fixtures |
+| `BINANCE_API_KEY` / `BINANCE_SECRET_KEY` | Order execution on Demo Mode | Prices still work; orders become fixture orders |
+| `BINANCE_MCP_ACCESS_TOKEN` | The MCP read rail | Falls through to Skill Hub, then REST, and reports which |
+| `X402_RAIL` | Which payment rail | Defaults to the public facilitator on Base Sepolia |
+
+---
+
+## 13. Verify every claim on this page
+
+Every command here runs without credentials unless marked otherwise.
+
+| Claim | Command | Expected |
+|---|---|---|
+| The budget gate is real | `npx tsx scripts/budget-test.ts` | **53 passed**, 13 checks |
+| The P&L math is right | `npx tsx scripts/pnl-test.ts` | **29 passed** |
+| The exit rules are right | `npx tsx scripts/exits-test.ts` | **26 passed** |
+| The B402 mapping is right | `npx tsx scripts/b402-test.ts` | **25 passed**, against the vendor's own parser |
+| Futures sizing is right | `npx tsx scripts/futures-test.ts` | **9 passed** |
+| State survives a SIGKILL | `npx tsx scripts/store-test.ts` | **12 passed**, spawns real processes |
+| The indicator port is exact | `npx tsx scripts/indicators-test.ts <path>` | Matches the reference over 19,980 bars |
+| Agent OS is actually serving | `npx tsx scripts/skillhub-smoke.ts --verbose` | `via: "cli"` |
+| MCP is not silently faked | `npx tsx scripts/mcp-smoke.ts --verbose` | Fails on a REST fallback, by design |
+| **Omon answers AS an MCP server** | `npx tsx scripts/mcp-server-smoke.ts --base https://www.omon-ai.duckdns.org` | **32 checks** |
+| A stranger's agent can discover and pay | `npx tsx scripts/discovery-smoke.ts` | **22 checks** |
+| The console shows what the system did | `npx tsx scripts/console-smoke.ts --tick` | **23 checks**, drives a live beat |
+| An outside client can pay a 402 | `node scripts/pay.mjs /api/intel` | A settled transaction |
+| Which Binance products are reachable | `npx tsx scripts/agent-os-matrix.ts --verbose` | The full matrix, regenerated |
+
+**154 offline assertions and 77 live checks, all green, run immediately before this README
+was written.**
