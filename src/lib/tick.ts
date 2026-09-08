@@ -39,7 +39,7 @@
  */
 import type { Decision, OrderResult, Signal, Venue } from "@/lib/types";
 import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
-import { getPrices, placeOrder } from "@/lib/exchange";
+import { getPrices, placeOrder, MIN_NOTIONAL_USD } from "@/lib/exchange";
 import { futuresMark, futuresMinNotional, placeFuturesOrder, placeableNotional } from "@/lib/futures";
 import { computeFuturesPnl, computePnl, drawdownUsd, realizedPnlWindowUsd } from "@/lib/pnl";
 import { exitsFor, type ExitProposal } from "@/lib/exits";
@@ -188,6 +188,40 @@ async function positionFor(
 }
 
 
+
+/**
+ * The first exit the exchange would actually accept.
+ *
+ * An unresolvable minimum sizes optimistically and lets the order through, the
+ * same call this file already makes when opening: a refused order is visible in
+ * the ledger, whereas one suppressed by a guess is not.
+ */
+async function firstPlaceable(
+  proposals: ExitProposal[],
+  marks: Record<string, string>,
+): Promise<ExitProposal | null> {
+  for (const p of proposals) {
+    let floor = MIN_NOTIONAL_USD;
+
+    if (p.venue === "futures") {
+      try {
+        floor = Math.max(floor, await futuresMinNotional(p.symbol, Number(marks[p.symbol])));
+      } catch {
+        // Unknown floor: let it through and let Binance answer.
+      }
+    }
+
+    if (p.sizeUsd >= floor) return p;
+
+    console.warn(
+      `[tick] ${p.symbol} ${p.venue} is stranded: $${p.sizeUsd.toFixed(2)} to close, ` +
+        `below the $${floor.toFixed(2)} minimum. ${p.rule} deferred.`,
+    );
+  }
+
+  return null;
+}
+
 /**
  * The exit the book is asking for, if any, as a signal.
  *
@@ -223,11 +257,25 @@ async function exitSignal(): Promise<{ signal: Signal; exit: ExitProposal } | nu
     return null;
   }
 
-  const exit = exitsFor({
+  const proposals = exitsFor({
     spot: computePnl(rows, marks).positions,
     futures: computeFuturesPnl(rows, marks).positions,
     now: Date.now(),
-  })[0];
+  });
+
+  // Drop exits the exchange would refuse for being too small, and do it HERE
+  // rather than letting the gate catch them downstream.
+  //
+  // This is a starvation bug, not a tidiness one. Closing a $14.79 perp rounds
+  // the quantity down to the symbol's step and can leave $7.40 behind — below
+  // BNBUSDT's $7.53 futures minimum, so no order of any size can clear it. The
+  // position is stranded until it grows or a human intervenes. That would be
+  // merely untidy, except exits run BEFORE the model: a permanently refused exit
+  // would pre-empt every beat forever and the agent would never trade again.
+  //
+  // So an exit that cannot be placed is not an exit. The beat falls through to
+  // intel and the dust waits for a beat where it can actually be cleared.
+  const exit = await firstPlaceable(proposals, marks);
   if (!exit) return null;
 
   return {
