@@ -40,6 +40,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GateCheck } from "@/lib/types";
+import { exitDistance } from "@/lib/exits";
 import type { ConsoleSnapshot } from "@/lib/console-state";
 import {
   AnimatedNumber,
@@ -62,6 +63,7 @@ import {
   signedUsd,
   usd,
   GateTrace,
+  ExitBar,
 } from "@/components/ui";
 
 type Connection = "connecting" | "live" | "reconnecting";
@@ -337,7 +339,7 @@ export default function Console() {
           <Card className="mt-3 flex h-[460px] flex-col overflow-hidden">
             {tab === "reasoning" ? <ReasoningPane snapshot={snapshot} now={now} /> : null}
             {tab === "intel" ? <IntelligencePane snapshot={snapshot} now={now} /> : null}
-            {tab === "positions" ? <PositionsPane snapshot={snapshot} /> : null}
+            {tab === "positions" ? <PositionsPane snapshot={snapshot} now={now} /> : null}
             {tab === "activity" ? (
               <ActivityPane snapshot={snapshot} now={now} fresh={newActions} />
             ) : null}
@@ -447,7 +449,7 @@ function PaneHeader({
   );
 }
 
-function PositionsPane({ snapshot }: { snapshot: ConsoleSnapshot }) {
+function PositionsPane({ snapshot, now }: { snapshot: ConsoleSnapshot; now: number }) {
   const { spot, futures } = snapshot.pnl;
   const futuresOff = snapshot.seams.futures.mode === "off";
 
@@ -457,7 +459,7 @@ function PositionsPane({ snapshot }: { snapshot: ConsoleSnapshot }) {
       <div className="flex min-h-0 flex-col">
         <PaneHeader
           title="Spot"
-          help="Coins bought and held outright. Profit is the live price against what Omon paid."
+          help="Coins bought and held outright. Profit is the live price against what Omon paid. Each row shows how far the position is from the three rules that close it: a profit target, a stop, and a time limit."
           right={
             <span className={`num text-sm font-semibold ${moneyTone(spot.totalUsd)}`}>
               {signedUsd(spot.totalUsd)}
@@ -504,6 +506,8 @@ function PositionsPane({ snapshot }: { snapshot: ConsoleSnapshot }) {
                       Fully sold. {signedUsd(row.realizedUsd)} booked.
                     </p>
                   )}
+
+                  {open ? <ExitBar {...exitDistance(row, now, snapshot.exits)} /> : null}
 
                   {open && Math.abs(row.realizedUsd) >= 0.005 ? (
                     <p className="num mt-0.5 text-xs text-faint">
@@ -589,6 +593,10 @@ function PositionsPane({ snapshot }: { snapshot: ConsoleSnapshot }) {
                           ? ` ${signedPct(row.unrealizedPct)} on the price move.`
                           : ""}
                       </p>
+                      {/* Measured on the price move, not on margin — the same
+                          number the exit rules use, so the line agrees with the
+                          decision it is predicting. */}
+                      <ExitBar {...exitDistance(row, now, snapshot.exits)} />
                     </>
                   ) : (
                     <p className="num mt-1.5 text-xs text-muted">

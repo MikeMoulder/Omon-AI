@@ -23,6 +23,7 @@ import { getIntel, intelCacheStatus, type CacheStatus } from "@/lib/intel-cache"
 import { getSignals, signalCacheStatus, type SignalCacheStatus } from "@/lib/signal-cache";
 import { actions, fills, ledgerSummary, purchases, type LedgerSummary } from "@/lib/ledger";
 import { computeVenuePnl, type VenuePnl } from "@/lib/pnl";
+import { exitLimitsFromEnv, type ExitLimits } from "@/lib/exits";
 import { storeStatus, type StoreStatus } from "@/lib/store";
 import { llmMode } from "@/lib/llm";
 import { mcpMode, mcpUsage } from "@/lib/mcp";
@@ -79,6 +80,15 @@ export type ConsoleSnapshot = {
    * about the same agent, and only one of them says which half is working.
    */
   pnl: VenuePnl;
+  /**
+   * The thresholds the exit rules enforce.
+   *
+   * Sent rather than hardcoded in the component because they are read from the
+   * environment per call, and a console showing "2.5%" while the agent actually
+   * runs at 4% would be worse than showing nothing. `exitDistance()` is pure, so
+   * the client does the arithmetic from these and the positions it already has.
+   */
+  exits: ExitLimits;
   /** Leverage ceiling, on screen next to the futures figures. */
   maxLeverage: number;
   limits: BudgetLimits;
@@ -207,6 +217,7 @@ export async function consoleSnapshot(): Promise<ConsoleSnapshot> {
     money: { in: purchases(12), out: actions(12) },
     ledger: ledgerSummary(),
     pnl: computeVenuePnl(fills(), priceRows),
+    exits: exitLimitsFromEnv(),
     maxLeverage: MAX_LEVERAGE,
     limits: limitsFromEnv(),
     balances: balanceRows,

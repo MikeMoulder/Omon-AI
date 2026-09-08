@@ -420,3 +420,60 @@ export function GateTrace({ checks }: { checks: GateCheck[] }) {
     </div>
   );
 }
+
+/**
+ * How far an open position is from each of its three exits.
+ *
+ * The exit rules are the least visible thing the agent does — they fire between
+ * beats, and until one triggers there is nothing on screen to say the agent is
+ * even watching. This line is that evidence: it says a position is 0.3% from its
+ * stop before the stop happens, which is the difference between a viewer
+ * believing there is a hold policy and taking it on trust.
+ *
+ * The nearest exit is coloured; the others stay quiet. Only one of them is about
+ * to matter and three highlighted numbers would say nothing.
+ */
+export function ExitBar({
+  toTakeProfitPct,
+  toStopLossPct,
+  toTimeStopMs,
+}: {
+  toTakeProfitPct: number | null;
+  toStopLossPct: number | null;
+  toTimeStopMs: number;
+}) {
+  const hours = toTimeStopMs / 3_600_000;
+
+  // Which exit is closest, in its own units. Percent distances compare directly;
+  // the clock is called nearest only inside the last hour, because "4h away" and
+  // "2% away" are not the same kind of close and pretending otherwise would
+  // highlight the wrong one all day.
+  const pcts = [toTakeProfitPct, toStopLossPct].filter((v): v is number => v !== null);
+  const nearestPct = pcts.length > 0 ? Math.min(...pcts) : null;
+  const clockNearest = hours <= 1 && (nearestPct === null || nearestPct > 0.5);
+
+  const tone = (isNearest: boolean, warn = false) =>
+    isNearest ? (warn ? "text-down" : "text-warn") : "text-faint";
+
+  return (
+    <p className="num mt-1 flex flex-wrap items-center gap-x-2.5 text-xs">
+      {toTakeProfitPct === null ? null : (
+        <span className={tone(!clockNearest && nearestPct === toTakeProfitPct)}>
+          target {toTakeProfitPct <= 0 ? "reached" : `${toTakeProfitPct.toFixed(2)}% away`}
+        </span>
+      )}
+      {toStopLossPct === null ? null : (
+        <span className={tone(!clockNearest && nearestPct === toStopLossPct, true)}>
+          stop {toStopLossPct <= 0 ? "reached" : `${toStopLossPct.toFixed(2)}% away`}
+        </span>
+      )}
+      <span className={tone(clockNearest)}>
+        {hours <= 0
+          ? "past its time limit"
+          : hours < 1
+            ? `${Math.round(hours * 60)}m left`
+            : `${hours.toFixed(1)}h left`}
+      </span>
+    </p>
+  );
+}
