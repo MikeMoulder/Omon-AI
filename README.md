@@ -539,18 +539,39 @@ have.
 
 ## 6. The budget layer, the part with no model in it
 
-[`src/lib/budget.ts`](src/lib/budget.ts). No model. No network. 28 tests.
-**Model output is untrusted input, and `sizeUsd` is treated as hostile.**
+[`src/lib/budget.ts`](src/lib/budget.ts). No model. No network. **Thirteen checks, 48
+assertions.** Model output is untrusted input, and `sizeUsd` is treated as hostile.
 
-| Control | Default | What it does |
-|---|---|---|
-| `maxTradeUsd` | 25 | Hard ceiling on any single trade |
-| `dailyTradeUsd` | 100 | Rolling 24h ceiling, derived from the durable ledger rows |
-| `allowedSymbols` | BNB, BTC, ETH | Nothing else is tradable, ever |
-| `requireApprovalAboveUsd` | 25 | Above this, a human. This is usually the number that actually binds |
-| `maxLeverage` | 3 | Hard cap, mirrored in the futures seam |
+Every trade runs the whole sequence, cheapest and most absolute first, so the reason
+returned is the most fundamental thing wrong rather than whichever rule happened to run
+last. **The gate returns the entire trace, not just the verdict**, and the console draws
+it as thirteen squares under each order.
 
-**Two rules that are safety properties rather than conveniences:**
+| # | Check | Default | Refuses when |
+|---|---|---|---|
+| 1 | size is a positive number | — | The model emitted `NaN`, `Infinity`, a negative, or a string that coerced badly |
+| 2 | symbol is on the allowlist | BNB, BTC, ETH | Anything else. Ever |
+| 3 | quote is fresh | 30s | The mark backing the size is older than this. A stale mark silently voids check 9 |
+| 4 | venue is enabled | — | A futures order on a build with futures off |
+| 5 | leverage within ceiling | 3x | Mirrored from the futures seam, so there is one number and not two that can disagree |
+| 6 | spot sell is covered | — | Selling more than Omon's own fills say it holds. Spot cannot short; this would bounce with `-2010` |
+| 7 | symbol is tradable at this cap | — | The symbol's floor is above the per-trade cap, so it cannot trade here at *any* size |
+| 8 | size meets the symbol minimum | — | Below the exchange's per-symbol notional floor |
+| 9 | size within per-trade cap | $25 | A single trade larger than this |
+| 10 | daily loss halt | $50 | The trailing 24h is that far down. **Opens only** |
+| 11 | drawdown within limit | $75 | That far below the high-water mark. Does not reset with the day. **Opens only** |
+| 12 | within daily spend cap | $100 | Rolling 24h, from the durable ledger. **Opens only** |
+| 13 | within auto-approve threshold | $25 | Above this a human decides. Usually the one that actually binds |
+
+Checks 10 and 11 exist because 9, 12 and 13 all bound how much can be **committed**, and
+none of them notices that every one of those trades lost. 10 catches a bad day; 11
+catches three mediocre ones in a row, because it does not reset when the window rolls.
+
+Both are dollars rather than percentages. A percentage needs account equity as its
+denominator, that is not derivable from a fill ledger, and inventing one from cost basis
+would produce a number that looks precise and means nothing.
+
+**Three rules that are safety properties rather than conveniences:**
 
 1. **Closing is never blocked by the spending cap.** The cap counts trades that
    *increase* exposure and exempts the ones that reduce it. A cap that also throttles
@@ -561,6 +582,10 @@ have.
    and carries $20 of exposure. The cap checks the $20, so "$100 a day" means one thing
    on both venues, and leverage cannot quietly multiply it. Margin is reported alongside,
    never instead.
+3. **A check that cannot measure its input skips rather than assuming healthy.** An
+   unmeasured quote age is not "fresh", and an unmeasured drawdown is not "zero". The
+   trace marks those grey, distinct from a pass, so the console never shows the gate
+   doing more work than it did. Four of the 48 assertions cover this alone.
 
 **A refusal that leaves no trace is indistinguishable from having no budget layer at
 all**, so BLOCK is written to the durable ledger with the same weight as a fill, and the
@@ -738,7 +763,7 @@ Every one of these runs without credentials unless marked.
 
 | Claim | Command | Expected |
 |---|---|---|
-| The budget layer is real | `npx tsx scripts/budget-test.ts` | **28 passed** |
+| The budget layer is real | `npx tsx scripts/budget-test.ts` | **48 passed**, 13 checks |
 | The P&L math is right | `npx tsx scripts/pnl-test.ts` | **26 passed** |
 | The B402 mapping is right | `npx tsx scripts/b402-test.ts` | **25 passed** |
 | Futures sizing is right | `npx tsx scripts/futures-test.ts` | **9 passed** |
