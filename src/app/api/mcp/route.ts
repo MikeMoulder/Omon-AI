@@ -96,6 +96,24 @@ function decodeChallenge(raw: string | null): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Where this process can reach itself over HTTP.
+ *
+ * NOT `request.nextUrl.origin`. Behind a reverse proxy Next reports that as
+ * `https://localhost:3111` — https, because of the forwarded protocol, against a
+ * port that speaks plain HTTP. Fetching it dies with
+ * `SSL routines: wrong version number`, and every paid MCP tool answered 500.
+ *
+ * `src/instrumentation.ts` already learned this and says why: a self-call must
+ * not depend on DNS, the Caddy vhost or a certificate. Same rule, same shape,
+ * and PORT is read at call time rather than module load for the same reason.
+ */
+function selfOrigin(): string {
+  const configured = process.env.MCP_SELF_URL ?? process.env.TICK_SELF_URL;
+  if (configured) return configured.replace(/\/$/, "");
+  return `http://127.0.0.1:${process.env.PORT ?? 3000}`;
+}
+
 async function proxyPaid(
   request: NextRequest,
   path: string,
@@ -110,7 +128,7 @@ async function proxyPaid(
   /** The settlement receipt, present once payment succeeded. */
   settlement: string | null;
 }> {
-  const url = new URL(path, request.nextUrl.origin);
+  const url = new URL(path, selfOrigin());
   const limit = Number(args?.limit);
   if (Number.isFinite(limit) && limit > 0) url.searchParams.set("limit", String(limit));
 

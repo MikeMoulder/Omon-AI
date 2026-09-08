@@ -149,7 +149,16 @@ async function main(): Promise<void> {
   for (const name of ["omon_intel", "omon_signal"]) {
     const res = await rpc("tools/call", { name, arguments: { limit: 1 } });
     const error = res.body?.error;
-    check(`${name} refuses an unpaid call`, Boolean(error), error ? "" : "it answered anyway");
+    // Distinguish the three ways this can go wrong. "It answered anyway" was
+    // reported for an HTTP 500 with an empty body, which sent me looking for a
+    // paywall bypass when the tool was simply crashing.
+    const why =
+      typeof res.body === "string"
+        ? `HTTP ${res.status}, non-JSON body: ${res.body.slice(0, 60) || "(empty)"}`
+        : res.body?.result
+          ? "it served the payload without payment"
+          : `HTTP ${res.status}, no error and no result`;
+    check(`${name} refuses an unpaid call`, Boolean(error), error ? "" : why);
     check(`${name} refuses with -32002`, error?.code === -32002, String(error?.code));
     check(`${name} attaches the challenge`, Boolean(error?.data));
     check(`${name} says where to pay`, typeof error?.data?.httpPath === "string", error?.data?.httpPath);
