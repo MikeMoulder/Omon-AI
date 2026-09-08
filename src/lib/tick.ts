@@ -45,7 +45,14 @@ import { computeFuturesPnl, computePnl, drawdownUsd, realizedPnlWindowUsd } from
 import { exitsFor, type ExitProposal } from "@/lib/exits";
 import { refreshIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { refreshSignals, signalCacheStatus } from "@/lib/signal-cache";
-import { fills, hasTradedSignal, recordAction, recordFill, spentTodayUsd } from "@/lib/ledger";
+import {
+  fills,
+  hasTradedSignal,
+  hasVetoedSignal,
+  recordAction,
+  recordFill,
+  spentTodayUsd,
+} from "@/lib/ledger";
 import { readDoc, writeDoc } from "@/lib/store";
 
 /**
@@ -345,26 +352,44 @@ async function beat(opts: {
     });
   }
 
-  // One signal, one trade.
+  // One signal, one verdict.
   //
   // The signal cache serves the same newest row for its whole TTL, so beats
   // inside that window all see this signal — and without this guard each of
-  // them places another order for an idea already acted on. The manual
-  // override is exempt: pressing the button to demonstrate a refusal must work
-  // on whatever signal is on screen, and a refusal never reaches the exchange.
-  // An exit's id is minted fresh each time and was never traded, so this guard
-  // cannot catch one. Checked explicitly anyway: a rule that silently stopped
-  // stops from firing would be the worst possible bug in this file.
-  if (!exiting && opts.sizeUsd === undefined && hasTradedSignal(signal.id)) {
-    return finish({
-      ok: true,
-      skipped: "signal already traded, waiting for new intel",
-      intel: intelRow,
-      signal,
-      decision: null,
-      order: null,
-      orderError: null,
-    });
+  // them re-submits an idea that has already been answered. Two ways an answer
+  // can be final, and both count:
+  //
+  //   traded  — an order reached the exchange. Trading it again doubles it.
+  //   vetoed  — the gate refused it. The gate is a pure function of the signal
+  //             and the ledger, so asking again returns the same no.
+  //
+  // The second arm was missing until 2026-09-08 and it cost 138 of 236 actions
+  // on the first long run: one $10 BTCUSDT futures signal was refused 58 times
+  // over 4h45m against a $50 exchange floor. See hasVetoedSignal().
+  //
+  // The manual override is exempt: pressing the button to demonstrate a refusal
+  // must work on whatever signal is on screen, and a refusal never reaches the
+  // exchange. An exit's id is minted fresh each time and was never traded, so
+  // this guard cannot catch one. Checked explicitly anyway: a rule that
+  // silently stopped stops from firing would be the worst possible bug here.
+  if (!exiting && opts.sizeUsd === undefined) {
+    const settled = hasTradedSignal(signal.id)
+      ? "signal already traded, waiting for new intel"
+      : hasVetoedSignal(signal.id)
+        ? "signal already refused, waiting for new intel"
+        : null;
+
+    if (settled) {
+      return finish({
+        ok: true,
+        skipped: settled,
+        intel: intelRow,
+        signal,
+        decision: null,
+        order: null,
+        orderError: null,
+      });
+    }
   }
 
   const requestedSizeUsd =

@@ -257,6 +257,29 @@ export function hasTradedSignal(signalId: string): boolean {
   return actionRows.some((a) => a.orderId !== null && a.payload?.signalId === signalId);
 }
 
+/**
+ * Has this signal already been refused by the gate?
+ *
+ * The companion to `hasTradedSignal()`, and the reason it is a separate
+ * question: a BLOCK is a VERDICT on the idea, not a transport failure. The gate
+ * is a pure function of the signal and the ledger, so re-running it on the same
+ * signal a beat later returns the same answer — re-submitting is work that
+ * cannot succeed.
+ *
+ * Measured on the 2026-09-06..08 run: 138 of 236 actions were repeat blocks of
+ * just 17 signals. One $10 BTCUSDT futures idea was refused 58 times over 4h45m
+ * against a $50 exchange minimum that was never going to move. Of the 14
+ * signals re-submitted at all, exactly one ever filled.
+ *
+ * Deliberately NOT extended to an ALLOW whose order failed. That is a refusal
+ * from Binance, not from us — a timeout or a venue hiccup is transient and a
+ * later beat may legitimately retry it. See `hasTradedSignal()`.
+ */
+export function hasVetoedSignal(signalId: string): boolean {
+  hydrate();
+  return actionRows.some((a) => a.decision === "BLOCK" && a.payload?.signalId === signalId);
+}
+
 /** Newest first. */
 export function purchases(limit = 20): Purchase[] {
   hydrate();
