@@ -470,3 +470,96 @@ export function computeVenuePnl(
     fillCount: spot.fillCount + futures.fillCount,
   };
 }
+
+/**
+ * The realised equity curve, and the two risk numbers derived from it.
+ *
+ * The budget gate needs to answer two questions that no single-trade check can:
+ * "how much has today already cost?" and "how far below its best is this agent
+ * now?" Both are properties of the whole ledger, so they live here next to the
+ * fold that produces every other P&L number, rather than being recomputed
+ * slightly differently somewhere else.
+ *
+ * ## Why these are dollars and not percentages
+ *
+ * A percentage needs a denominator, and the only honest one is account equity,
+ * which is not derivable from a fill ledger — it lives at the exchange behind a
+ * network call. A gate that must be deterministic and offline cannot make that
+ * call, and inventing a denominator (cost basis, notional traded) would produce
+ * a number that looks precise and means nothing. Dollars are what the ledger
+ * actually knows.
+ */
+
+/** Cumulative booked profit after each fill, in order. */
+export type EquityPoint = { at: string; realizedUsd: number };
+
+/**
+ * Replay the ledger, recording booked profit after every fill.
+ *
+ * Folds a growing prefix rather than reimplementing the pot math, so this can
+ * never drift from the headline number the console shows — it is the same
+ * function, called n times. That is O(n^2) in fills, which is free at the
+ * hundreds this agent produces and would need a running fold at millions.
+ */
+export function equityCurve(fills: Fill[]): EquityPoint[] {
+  const ordered = [...fills].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+
+  return ordered.map((fill, i) => {
+    const upTo = ordered.slice(0, i + 1);
+    const venue = computeVenuePnl(upTo);
+    return {
+      at: fill.createdAt,
+      realizedUsd: venue.spot.realizedUsd + venue.futures.realizedUsd,
+    };
+  });
+}
+
+/**
+ * Booked profit over the trailing window. Negative means the day has cost money.
+ *
+ * The difference between cumulative realised now and cumulative realised as of
+ * the window's start, which is the only way to attribute a close to a day
+ * without double-counting the position that opened before it.
+ */
+export function realizedPnlWindowUsd(
+  fills: Fill[],
+  now = Date.now(),
+  windowMs = 24 * 60 * 60 * 1000,
+): number {
+  const curve = equityCurve(fills);
+  if (curve.length === 0) return 0;
+
+  const start = now - windowMs;
+  // Cumulative realised at the last fill before the window opened. Nothing
+  // before the window means the agent started flat, which is zero.
+  const before = curve.filter((p) => new Date(p.at).getTime() < start).at(-1)?.realizedUsd ?? 0;
+  const latest = curve.at(-1)?.realizedUsd ?? 0;
+
+  return latest - before;
+}
+
+/**
+ * How far below its high-water mark the agent is, in dollars. Never negative.
+ *
+ * The historical curve is realised-only, because reconstructing what a position
+ * was worth at some past instant would need marks this ledger never stored.
+ * Today's point is marked to market, so it includes open profit and loss.
+ *
+ * That asymmetry is deliberate and it errs in the safe direction: during an
+ * unrealised run-up the peak is understated, so measured drawdown is larger than
+ * the truth and a halt fires earlier than it strictly needs to. For a check
+ * whose job is to stop an agent digging, firing early is the correct bias.
+ */
+export function drawdownUsd(fills: Fill[], marks: Record<string, string> = {}): number {
+  const curve = equityCurve(fills);
+  const venue = computeVenuePnl(fills, marks);
+  const current = venue.totalUsd;
+
+  // The agent starts flat, so zero is always a candidate peak — otherwise an
+  // agent that has only ever lost money would report no drawdown at all.
+  const peak = Math.max(0, current, ...curve.map((p) => p.realizedUsd));
+
+  return Math.max(0, peak - current);
+}
