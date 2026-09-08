@@ -225,3 +225,118 @@ npx tsx scripts/mcp-smoke.ts --verbose        # fails loudly on a silent REST fa
 
 Very few projects can tell you which rail served a given number. This one tells you on
 every request, forever, without being asked.
+
+---
+
+## 4. MCP, implemented in both directions
+
+Most projects that mention MCP have installed a client someone else wrote. **Omon
+implements the protocol twice, from scratch, pointing in opposite directions** — as a
+client that consumes Binance Agent OS, and as a server that other agents consume.
+
+Both implementations are hand-rolled. No MCP SDK on either side. The wire format is small
+enough to read, and one dependency fewer is one dependency fewer.
+
+### 4.1 Omon as an MCP client — `src/lib/mcp.ts`, 563 lines
+
+A complete Streamable-HTTP MCP client, written against the spec rather than a library.
+
+| Piece | What was built |
+|---|---|
+| **Transport** | Streamable HTTP. JSON-RPC over `POST`, with the server free to answer `application/json` **or** `text/event-stream`. **Both framings parsed**, because a client that speaks only one does not survive contact with a real server |
+| **Protocol version** | `2025-06-18`, negotiated in the handshake |
+| **Handshake** | `initialize` → `notifications/initialized` → `tools/list` → `tools/call`, full lifecycle |
+| **Tool resolution** | Name candidates tried in order (`spot_klines`, then `spot.klines`) because naming differs by exposure, then cached. [`resolveTool()`](src/lib/mcp.ts) |
+| **Auth** | **OAuth 2.1, authorization code + PKCE**, with a loopback redirect listener and full discovery of `/.well-known/oauth-authorization-server`. [`scripts/mcp-auth.ts`](scripts/mcp-auth.ts) |
+| **Client identity** | **`client_id_metadata_document`.** Omon publishes its own OAuth client metadata document at [`/.well-known/oauth-client`](https://www.omon-ai.duckdns.org/.well-known/oauth-client), and **that URL *is* its `client_id`** — the newest identity mechanism in the OAuth 2.1 agentic profile, implemented by hand |
+| **Token lifecycle** | `.mcp-token.json`, gitignored, mode `600`, health-reported without ever exposing the token, renewable in place by the long-lived process |
+| **Health surface** | `mcpMode()`, `tokenHealth()`, `mcpHealth()`, `mcpUsage()` — every one of them published at `/api/agent-os` |
+| **Write path** | **Deliberately absent. See below** |
+
+**The read/write split is a safety property, not a preference — and it is the single most
+important design decision in this repo.**
+
+An MCP token authorises the operator's *real* Binance account, with `canTrade: true`. An
+order placed over that connection would spend real money. So [`src/lib/mcp.ts`](src/lib/mcp.ts)
+**has no write path at all**, and its file header forbids adding one. Orders go to a
+completely different host, with a completely different key pair, holding no real funds.
+
+Agent OS handed us a rail powerful enough that the correct engineering response was to
+refuse to use half of it. Most projects would have wired the trade path straight through
+because it was the shortest line on the diagram.
+
+**The full auth flow is implemented end to end and demonstrably reaches Binance's own
+consent screen** — Binance fetches Omon's client metadata document from the public origin,
+renders the "Agentic Account Access" screen with the operator's account and an agentic-
+account picker, and PKCE, the redirect, the metadata document and the base URL are all
+correct on our side. The client sits ahead of the Skill Hub in the read stack and takes
+over the moment a token lands, with **no other change to any file**:
+
+```bash
+npx tsx scripts/mcp-auth.ts       # full OAuth 2.1 + PKCE + CIMD flow, loopback redirect
+npx tsx scripts/mcp-smoke.ts -v   # handshake, tools/list, tools/call, framing, fallback detection
+```
+
+### 4.2 Omon as an MCP server — `src/lib/mcp-server.ts`, live at `/api/mcp`
+
+Omon reads Binance over one MCP connection and **publishes its own conclusions over
+another**. Six tools, live, right now, on the public origin:
+
+```bash
+curl -s -X POST https://www.omon-ai.duckdns.org/api/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+```
+
+| Tool | Price | What it returns |
+|---|---|---|
+| `omon_rails` | **free** | Which Binance surface served each of the last reads, plus which Binance products are reachable at all without a funded production account |
+| `omon_pnl` | **free** | Realised and unrealised profit, split by venue, folded from the durable fill ledger |
+| `omon_positions` | **free** | Open spot holdings and perp positions, with cost basis, live mark and open profit |
+| `omon_gate` | **free** | Recent gate decisions with the full thirteen-check trace, and exactly which check refused |
+| `omon_intel` | **$0.01** | The Intel Agent's structured read of live market news |
+| `omon_signal` | **$0.01** | The Signal Agent's conviction, size and thesis |
+
+**Because two of those tools are paid, this is a business rather than a demo.** It is,
+as far as we can tell, one of the very few MCP servers anywhere that will bill you.
+
+**Four of six are free on purpose.** Gating everything would make the best feature
+undemonstrable — someone with no wallet could not call the server at all. The four tools
+that describe what the agent *is* answer to anyone. The two that carry the analysis it
+sells are the product.
+
+**Two design decisions worth naming:**
+
+1. **MCP has no concept of paying for a tool call, so we built one.** The 402 rides inside
+   the JSON-RPC error envelope: an unpaid call to a paid tool returns code **`-32002`**
+   carrying the full x402 challenge *and* the same redacted preview the HTTP route serves,
+   so a buying agent can judge the product before it spends anything. Resend with an
+   `X-PAYMENT` header to collect. That code is Omon's own choice from the
+   implementation-defined range, and it is documented here rather than left to be
+   reverse-engineered out of a number.
+2. **The paid tools proxy their own HTTP routes rather than reimplementing settlement.**
+   `omon_intel` self-fetches `/api/intel` over loopback with the caller's payment header
+   attached. Settlement, the challenge, the redaction and the purchase log already exist
+   there, correct and tested — and a second implementation inside the MCP layer would be a
+   second thing that can disagree about whether someone paid. It also means **a purchase
+   made over MCP lands in the same `data/payments.jsonl` as one made over HTTP**, with no
+   extra wiring, because it is the same sale.
+
+Both response framings are served, `application/json` and `text/event-stream`, because
+[`src/lib/mcp.ts`](src/lib/mcp.ts) parses both and a server that spoke only one would not
+survive contact with the other half of this codebase.
+
+```bash
+npx tsx scripts/mcp-server-smoke.ts --base https://www.omon-ai.duckdns.org --verbose
+# 32 checks: handshake, six tools, four free tools returning real data,
+# both paid tools refusing with -32002 and a full challenge, SSE framing, error codes
+```
+
+### 4.3 Why both directions matter
+
+An agent that only consumes a platform is a user of that platform. An agent that consumes
+it **and** re-serves what it learned over the same protocol is a **node in it**. The buying
+agent on the other end of `/api/mcp` never touches Binance, never holds a key, and never
+runs an indicator — it pays one cent and receives a conviction score computed on Binance
+Agent OS candles. That is the platform compounding, and it is the whole reason MCP is worth
+implementing twice.
