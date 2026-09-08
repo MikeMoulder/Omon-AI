@@ -39,6 +39,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { GateCheck } from "@/lib/types";
 import type { ConsoleSnapshot } from "@/lib/console-state";
 import {
   AnimatedNumber,
@@ -60,6 +61,7 @@ import {
   signedPct,
   signedUsd,
   usd,
+  GateTrace,
 } from "@/components/ui";
 
 type Connection = "connecting" | "live" | "reconnecting";
@@ -620,7 +622,7 @@ function ActivityPane({
     <div className="flex min-h-0 flex-1 flex-col">
       <PaneHeader
         title="Orders placed and refused"
-        help="Every trade the agent proposed and the verdict the spending limits gave it. Red rows never reached the exchange."
+        help="Every trade the agent proposed and the verdict the spending limits gave it. Red rows never reached the exchange. The squares under each row are the thirteen checks the gate ran, in order — hover one to read it."
         right={
           <span className="whitespace-nowrap text-xs text-muted">
             {snapshot.ledger.orderCount} placed, {snapshot.ledger.blockedCount} refused
@@ -669,6 +671,11 @@ function ActivityPane({
                 </div>
 
                 <p className="mt-1.5 text-xs leading-relaxed text-muted">{plain(row.reason)}</p>
+
+                {/* Every check the gate ran on this trade. The sentence above
+                    is the verdict; this is the working. */}
+                <GateTrace checks={(row.payload.checks as GateCheck[] | undefined) ?? []} />
+
                 <p className="num mt-0.5 text-xs text-faint">
                   {row.orderId ? `Order ${row.orderId}, ` : ""}
                   {ago(row.createdAt, now)}

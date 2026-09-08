@@ -16,6 +16,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { GateCheck } from "@/lib/types";
 
 const MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -363,5 +364,59 @@ export function Row({
     >
       {children}
     </li>
+  );
+}
+
+/**
+ * The budget gate's check trace, as a strip of numbered squares.
+ *
+ * Thirteen checks run on every trade and until now the console showed only the
+ * sentence from whichever one refused. That sentence is the important part, but
+ * on its own it reads as a single opinion rather than a sequence — and "the
+ * spending limits said no" is exactly the claim a judge has no reason to
+ * believe. The strip is the evidence: every check, in order, with the one that
+ * stopped it marked.
+ *
+ * Skips are grey rather than green on purpose. A futures rule on a spot order
+ * approved nothing, and colouring it as a pass would inflate what the gate did.
+ */
+export function GateTrace({ checks }: { checks: GateCheck[] }) {
+  if (!checks || checks.length === 0) return null;
+
+  const passed = checks.filter((c) => c.status === "pass").length;
+  const skipped = checks.filter((c) => c.status === "skip").length;
+  const failed = checks.find((c) => c.status === "fail");
+
+  const tone = (status: GateCheck["status"]): string =>
+    status === "pass"
+      ? "bg-up/70"
+      : status === "fail"
+        ? "bg-down"
+        : "bg-faint/30";
+
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-center gap-[3px]">
+        {checks.map((c) => (
+          <span
+            key={c.n}
+            // The native tooltip is deliberate: it needs no state, no portal and
+            // no JS, and it survives being screen-recorded.
+            title={`${c.n}. ${c.name}${c.detail ? ` — ${c.detail}` : ""}`}
+            className={`h-[6px] w-[6px] rounded-[1px] ${tone(c.status)}`}
+          />
+        ))}
+        <span className="num ml-1.5 text-[10px] text-faint">
+          {checks.length} checks
+          {passed > 0 ? `, ${passed} passed` : ""}
+          {skipped > 0 ? `, ${skipped} skipped` : ""}
+        </span>
+      </div>
+      {failed ? (
+        <p className="num mt-1 text-[10px] text-down">
+          check {failed.n} of {checks.length} refused: {failed.name}
+        </p>
+      ) : null}
+    </div>
   );
 }
