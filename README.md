@@ -175,7 +175,7 @@ the protocol it both speaks and serves.
 | 2 | **Binance Skill Hub** `binance-cli 2.1.1` | `spot ticker-price`, `spot klines` — the candles the entire strategy computes on, batched 3.3× | [`src/lib/skillhub.ts`](src/lib/skillhub.ts) |
 | 3 | **Binance Exchange API**, Spot Demo Mode | Order execution, balances, exchange filters. **39 fills** | [`src/lib/exchange.ts`](src/lib/exchange.ts) |
 | 4 | **Binance USDⓈ-M Futures** | Perpetuals, leverage, signed positions, `reduceOnly` closes. **15 fills** | [`src/lib/futures.ts`](src/lib/futures.ts) · 710 lines |
-| 5 | **Binance Pay / OnchainPay — B402** `@bnb-chain/b402` | The BSC payment rail, mapped against the vendor SDK, published, **25 assertions** | [`src/lib/b402.ts`](src/lib/b402.ts) |
+| 5 | **Binance Pay / OnchainPay — B402** `@bnb-chain/b402` | The BSC payment rail, mapped against the vendor SDK, published, **25 assertions**. Fully configured; the merchant credentials it settles with are [pending onboarding](#102-b402--binances-own-rail-mapped-against-the-vendor-sdk) | [`src/lib/b402.ts`](src/lib/b402.ts) |
 | 6 | **Agent OS discovery conventions** | Publishing, machine-readably, which surface served every single read | [`src/lib/service.ts`](src/lib/service.ts) |
 | 7 | **MCP — as a server** | Omon serving **its own six tools** to other agents over the same protocol it reads Binance with. Two of them paid | [`src/lib/mcp-server.ts`](src/lib/mcp-server.ts) |
 
@@ -834,6 +834,52 @@ where money actually landed can ever show "b402" over a figure that settled else
 curl -s https://www.omon-ai.duckdns.org/api/b402 | jq '.b402.wouldAdvertise'
 # the exact accepts entry, on eip155:56, eip3009, atomic units — built by the live code path
 ```
+
+**Everything B402 needs on this side is built, configured and tested. What is left is a form
+Binance has not opened yet.**
+
+The mapping, the route config, the atomic-unit pricing, the transfer method, the published
+challenge and the 25 assertions against the vendor's own parser are all done and all runnable
+today with no credentials. `X402_RAIL=b402` is a one-variable flip, not a refactor.
+
+Two values are deliberately **not** set here, and setting them from this side would itself be
+the bug:
+
+| Value | Who supplies it |
+|---|---|
+| `signerAddress` | The B402 facilitator, per merchant, from its RSA-gated `/supported` endpoint |
+| `spenderAddress` | The same endpoint — the scheme merges both in itself |
+
+Guessing either would put a wrong address into a real payment challenge and send a buyer's
+money somewhere nothing is watching. So [`src/lib/b402.ts`](src/lib/b402.ts) refuses to guess,
+and `X402_RAIL=b402` hard-fails without credentials **on purpose**. `/supported` answers only
+to an onboarded Binance Pay merchant, and merchant onboarding for OnchainPay / B402 is not yet
+open to independent developers — so the request cannot be made, rather than having been made
+and refused.
+
+The remaining sequence is therefore not engineering:
+
+```text
+Binance opens merchant onboarding
+  -> request OnchainPay / B402 merchant credentials
+  -> four environment variables get values
+  -> X402_RAIL=b402 settles on BNB Smart Chain
+```
+
+`b402Readiness()` reports those variables by **name and never by value**, so this page and the
+live endpoint can both state exactly what is outstanding without leaking anything:
+
+```bash
+npx tsx scripts/b402-test.ts                          # 25 passed, today, no credentials
+curl -s https://www.omon-ai.duckdns.org/api/b402 | jq '.b402.missing'
+# { "credentials": [ "B402_BASE_URL", "B402_CLIENT_ID", "B402_ACCESS_TOKEN",
+#                    "B402_PRIVATE_KEY" ],
+#   "token":       [ "B402_TOKEN_ADDRESS", "B402_TOKEN_NAME" ] }
+```
+
+**Nothing in this section is a roadmap item.** It is a wired rail, publishing a byte-exact
+challenge from the live code path, waiting on four values that only a merchant account can
+issue.
 
 ### 10.3 Why two rails
 
