@@ -46,6 +46,21 @@ export type BudgetLimits = {
    * not the notional the gate approved, which quietly voids the per-trade cap.
    */
   maxQuoteAgeMs: number;
+  /**
+   * Booked loss over the trailing 24h that stops the agent opening anything new.
+   *
+   * A positive number describing a negative outcome: 50 means "halt once the day
+   * is $50 down". The per-trade and daily caps bound how much can be *committed*;
+   * neither notices that every one of those trades lost.
+   */
+  dailyLossHaltUsd: number;
+  /**
+   * Distance below the high-water mark that stops the agent opening anything new.
+   *
+   * The daily loss halt resets with the window. This one does not, so an agent
+   * losing steadily over three days is caught by this and not by that.
+   */
+  maxDrawdownUsd: number;
 };
 
 const DEFAULTS: BudgetLimits = {
@@ -55,6 +70,8 @@ const DEFAULTS: BudgetLimits = {
   requireApprovalAboveUsd: 25,
   maxLeverage: 3,
   maxQuoteAgeMs: 30_000,
+  dailyLossHaltUsd: 50,
+  maxDrawdownUsd: 75,
 };
 
 function num(value: string | undefined, fallback: number): number {
@@ -81,6 +98,8 @@ export function limitsFromEnv(): BudgetLimits {
     // number and not two that can disagree about what the ceiling is.
     maxLeverage: MAX_LEVERAGE,
     maxQuoteAgeMs: num(process.env.BUDGET_MAX_QUOTE_AGE_MS, DEFAULTS.maxQuoteAgeMs),
+    dailyLossHaltUsd: num(process.env.BUDGET_DAILY_LOSS_HALT_USD, DEFAULTS.dailyLossHaltUsd),
+    maxDrawdownUsd: num(process.env.BUDGET_MAX_DRAWDOWN_USD, DEFAULTS.maxDrawdownUsd),
   };
 }
 
@@ -150,6 +169,16 @@ export function evaluateTrade(args: {
    * worse than one that says it did not look.
    */
   quoteAgeMs?: number;
+  /**
+   * Booked profit over the trailing 24h, from `realizedPnlWindowUsd()`.
+   * Negative means the day has cost money. Undefined skips the halt.
+   */
+  realizedPnl24hUsd?: number;
+  /**
+   * Dollars below the high-water mark, from `drawdownUsd()`. Never negative.
+   * Undefined skips the halt.
+   */
+  drawdownUsd?: number;
 }): Decision {
   const limits = args.limits ?? limitsFromEnv();
   const spent = Math.max(0, args.spentTodayUsd);
@@ -290,6 +319,47 @@ export function evaluateTrade(args: {
     );
   }
   pass("size within per-trade cap", `$${limits.maxTradeUsd} cap`);
+
+  // Both halts below stop the agent taking ON risk and never stop it shedding
+  // risk. Same rule as the daily cap, for the same reason: an agent forbidden to
+  // exit a losing position because it is losing is in a strictly worse state
+  // than one that never traded. Every gate added here must exempt closes.
+
+  if (args.realizedPnl24hUsd !== undefined && !closing) {
+    if (!Number.isFinite(args.realizedPnl24hUsd)) {
+      return block("daily loss halt", `realised P&L ${String(args.realizedPnl24hUsd)} is not a number`);
+    }
+    if (args.realizedPnl24hUsd <= -limits.dailyLossHaltUsd) {
+      return block(
+        "daily loss halt",
+        `today is $${Math.abs(args.realizedPnl24hUsd).toFixed(2)} down, at or past the ` +
+          `$${limits.dailyLossHaltUsd} halt. No new risk until the window rolls`,
+      );
+    }
+    pass(
+      "daily loss halt",
+      `today ${args.realizedPnl24hUsd >= 0 ? "+" : "-"}$${Math.abs(args.realizedPnl24hUsd).toFixed(2)} ` +
+        `of $${limits.dailyLossHaltUsd}`,
+    );
+  } else {
+    skip("daily loss halt", closing ? "closes are exempt" : "caller did not measure the day");
+  }
+
+  if (args.drawdownUsd !== undefined && !closing) {
+    if (!Number.isFinite(args.drawdownUsd) || args.drawdownUsd < 0) {
+      return block("drawdown within limit", `drawdown ${String(args.drawdownUsd)} is not a valid distance`);
+    }
+    if (args.drawdownUsd >= limits.maxDrawdownUsd) {
+      return block(
+        "drawdown within limit",
+        `$${args.drawdownUsd.toFixed(2)} below the high-water mark, at or past the ` +
+          `$${limits.maxDrawdownUsd} limit. No new risk until it recovers`,
+      );
+    }
+    pass("drawdown within limit", `$${args.drawdownUsd.toFixed(2)} of $${limits.maxDrawdownUsd}`);
+  } else {
+    skip("drawdown within limit", closing ? "closes are exempt" : "caller did not measure the peak");
+  }
 
   // See the header: closes are exempt. An agent that cannot exit because it hit
   // its own spending cap is in a worse position than one that never traded.

@@ -13,6 +13,8 @@ const LIMITS: BudgetLimits = {
   requireApprovalAboveUsd: 25,
   maxLeverage: 3,
   maxQuoteAgeMs: 30_000,
+  dailyLossHaltUsd: 50,
+  maxDrawdownUsd: 75,
 };
 
 // Futures is opt-in, and evaluateTrade() refuses a futures trade on a build
@@ -370,6 +372,109 @@ check("a blocked trade names exactly one failing check", () => {
 check("the trace stops at the check that refused", () => {
   const d = evaluateTrade({ symbol: "DOGEUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
   assert.equal(d.checks.at(-1)?.status, "fail");
+});
+
+
+// ── Checks 10 and 11: the two ledger-wide halts ─────────────────────────────
+//
+// The per-trade and daily caps bound how much can be COMMITTED. Neither notices
+// that every one of those trades lost. These two do.
+//
+// The property that matters most here is the exemption: both halts must stop the
+// agent taking on risk and must never stop it shedding risk. An agent forbidden
+// to exit a losing position because it is losing is in a strictly worse state
+// than one that never traded.
+
+check("allows an open while the day is only mildly down", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    realizedPnl24hUsd: -10,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("halts new risk once the day is at the loss limit", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    realizedPnl24hUsd: -50,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /\$50\.00 down/);
+});
+
+check("the daily loss halt never blocks a spot close", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    side: "SELL", holdingUsd: 100, realizedPnl24hUsd: -500,
+  });
+  assert.equal(d.decision, "ALLOW");
+  assert.equal(d.checks.find((c) => c.name === "daily loss halt")?.status, "skip");
+});
+
+check("the daily loss halt never blocks a reduceOnly futures close", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    venue: "futures", leverage: 3, reduceOnly: true, realizedPnl24hUsd: -500,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("a profitable day does not halt", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    realizedPnl24hUsd: 30,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("allows an open while inside the drawdown limit", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    drawdownUsd: 20,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("halts new risk at the drawdown limit", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    drawdownUsd: 75,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /high-water mark/);
+});
+
+check("the drawdown halt never blocks a close", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    side: "SELL", holdingUsd: 100, drawdownUsd: 9_999,
+  });
+  assert.equal(d.decision, "ALLOW");
+  assert.equal(d.checks.find((c) => c.name === "drawdown within limit")?.status, "skip");
+});
+
+check("a negative drawdown is refused, not read as healthy", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    drawdownUsd: -5,
+  });
+  assert.equal(d.decision, "BLOCK");
+});
+
+check("unmeasured ledger risk skips both halts rather than assuming healthy", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  assert.equal(d.checks.find((c) => c.name === "daily loss halt")?.status, "skip");
+  assert.equal(d.checks.find((c) => c.name === "drawdown within limit")?.status, "skip");
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("the gate runs thirteen checks", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS,
+    quoteAgeMs: 1_000, realizedPnl24hUsd: 0, drawdownUsd: 0,
+  });
+  assert.equal(d.checks.length, 13);
+  d.checks.forEach((c, i) => assert.equal(c.n, i + 1));
 });
 
 console.log(`\n${passed} passed\n`);
