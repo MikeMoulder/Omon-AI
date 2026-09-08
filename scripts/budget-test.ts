@@ -477,4 +477,54 @@ check("the gate runs thirteen checks", () => {
   d.checks.forEach((c, i) => assert.equal(c.n, i + 1));
 });
 
+
+// ── Closes are exempt from every size limit, not just the daily cap ─────────
+//
+// Found by the exit rules against the real ledger: a $25 per-trade cap with a
+// $1000 daily allowance had let a spot position reach $198 over several beats,
+// and the stop-loss that wanted to close it was refused for exceeding the cap.
+// An agent that cannot exit is the exact state these exemptions exist to avoid.
+
+check("a spot close above the per-trade cap is allowed", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 198, spentTodayUsd: 0, limits: LIMITS,
+    side: "SELL", holdingUsd: 200,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("a reduceOnly futures close above the per-trade cap is allowed", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 198, spentTodayUsd: 0, limits: LIMITS,
+    venue: "futures", leverage: 3, reduceOnly: true,
+  });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("a close above the cap is not parked in REQUIRE_APPROVAL either", () => {
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 198, spentTodayUsd: 0, limits: LIMITS,
+    side: "SELL", holdingUsd: 200,
+  });
+  assert.notEqual(d.decision, "REQUIRE_APPROVAL");
+  assert.equal(d.checks.find((c) => c.name === "within auto-approve threshold")?.status, "skip");
+});
+
+check("an OPEN above the per-trade cap is still refused", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 198, spentTodayUsd: 0, limits: LIMITS });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /per-trade cap/);
+});
+
+check("a close is still bounded by what is actually held", () => {
+  // The exemption removes the cap, not the position. Selling more than the
+  // ledger says Omon owns is still an order that would bounce.
+  const d = evaluateTrade({
+    symbol: "BNBUSDT", sizeUsd: 198, spentTodayUsd: 0, limits: LIMITS,
+    side: "SELL", holdingUsd: 50,
+  });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /more BNB than Omon holds/);
+});
+
 console.log(`\n${passed} passed\n`);

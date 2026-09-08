@@ -11,12 +11,19 @@
  *
  * ## Two rules added with futures and spot sells
  *
- * **1. Closing is never blocked by the spending cap.** The daily cap counts
- * trades that INCREASE exposure and exempts the ones that reduce it. This is a
- * safety property, not a loophole: a cap that also throttles exits can leave the
- * agent holding a position it is forbidden to close, which is a strictly more
- * dangerous state than the one the cap was protecting against. An agent must
- * always be able to get out.
+ * **1. Closing is never blocked by a size or spending limit.** The daily cap,
+ * the per-trade cap and the approval threshold all count trades that INCREASE
+ * exposure and all exempt the ones that reduce it. This is a safety property,
+ * not a loophole: a limit that also throttles exits can leave the agent holding
+ * a position it is forbidden to close, which is a strictly more dangerous state
+ * than the one the limit was protecting against. An agent must always be able to
+ * get out.
+ *
+ * The per-trade exemption was added when the exit rules landed and found a real
+ * instance: a $25 cap with a $1000 daily allowance had let a spot position
+ * accumulate to $198 over several beats, and the stop-loss that wanted to close
+ * it was refused for exceeding the per-trade cap. Nothing goes unbounded — a
+ * spot sell is capped at what is held, and a futures close is reduceOnly.
  *
  * **2. `sizeUsd` means notional on both venues.** On futures, $20 at 3x posts
  * about $6.67 of margin and carries $20 of exposure. The cap is checked against
@@ -312,13 +319,27 @@ export function evaluateTrade(args: {
   }
   pass("size meets the symbol minimum", `$${floor.toFixed(2)} floor`);
 
-  if (args.sizeUsd > limits.maxTradeUsd) {
+  // Closes are exempt from the per-trade cap, for the same reason they are
+  // exempt from the daily one — and this is not hypothetical. A $25 cap with a
+  // $1000 daily allowance lets a position accumulate to $198 across eight beats,
+  // and a cap that also applies to selling then forbids the agent from ever
+  // closing it. That is the exact state the exemption rule exists to prevent:
+  // stranded in a position, holding the risk, not allowed to act.
+  //
+  // Nothing is unbounded by this. A spot sell is already capped at what the
+  // ledger says is held (check 6) and a futures close is reduceOnly, so the
+  // position itself is the ceiling.
+  if (!closing && args.sizeUsd > limits.maxTradeUsd) {
     return block(
       "size within per-trade cap",
       `$${args.sizeUsd.toFixed(2)} exceeds the $${limits.maxTradeUsd} per-trade cap`,
     );
   }
-  pass("size within per-trade cap", `$${limits.maxTradeUsd} cap`);
+  if (closing) {
+    skip("size within per-trade cap", "closes are bounded by the position, not the cap");
+  } else {
+    pass("size within per-trade cap", `$${limits.maxTradeUsd} cap`);
+  }
 
   // Both halts below stop the agent taking ON risk and never stop it shedding
   // risk. Same rule as the daily cap, for the same reason: an agent forbidden to
@@ -376,7 +397,10 @@ export function evaluateTrade(args: {
     pass("within daily spend cap", `$${remainingUsd.toFixed(2)} of $${limits.dailyTradeUsd} left`);
   }
 
-  if (args.sizeUsd > limits.requireApprovalAboveUsd) {
+  // Same exemption, same reason. Parking an exit in REQUIRE_APPROVAL leaves the
+  // agent holding the risk until a human wakes up, which is the failure this
+  // whole rule exists to avoid. A human gates opening, never closing.
+  if (!closing && args.sizeUsd > limits.requireApprovalAboveUsd) {
     checks.push({
       n: next(),
       name: "within auto-approve threshold",
@@ -390,7 +414,11 @@ export function evaluateTrade(args: {
       checks,
     };
   }
-  pass("within auto-approve threshold", `$${limits.requireApprovalAboveUsd} threshold`);
+  if (closing) {
+    skip("within auto-approve threshold", "an exit never waits for a human");
+  } else {
+    pass("within auto-approve threshold", `$${limits.requireApprovalAboveUsd} threshold`);
+  }
 
   const margin =
     venue === "futures" && (args.leverage ?? 1) > 1
