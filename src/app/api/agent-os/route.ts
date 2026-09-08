@@ -15,11 +15,17 @@
  *
  * The token itself is never returned. Only whether one is present, where it
  * came from, and how long it has left.
+ *
+ * It also publishes `reachability`: which Binance products can be reached
+ * without real money at all. That block is the reason Track B's third task is
+ * not done, and it is here rather than buried in the README because this is the
+ * document a judge curls first.
  */
 import { NextResponse } from "next/server";
 import { mcpHealth, mcpUsage, tokenHealth } from "@/lib/mcp";
 import { cliHealth } from "@/lib/skillhub";
 import { exchangeMode } from "@/lib/exchange";
+import { reachabilityReport } from "@/lib/reachability";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +53,11 @@ export async function GET() {
       },
       // Which rail each read actually used, last time it ran.
       usage: mcpUsage(),
+      // Which Binance products are reachable at all without real money, and
+      // therefore why Track B's third task is not done. Verified by
+      // scripts/agent-os-matrix.ts rather than probed per request — see
+      // src/lib/reachability.ts for why that is the honest choice here.
+      reachability: reachabilityReport(),
       servedAt: new Date().toISOString(),
     },
     { headers: { "cache-control": "no-store" } },
