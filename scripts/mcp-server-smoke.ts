@@ -153,6 +153,15 @@ async function main(): Promise<void> {
     check(`${name} refuses with -32002`, error?.code === -32002, String(error?.code));
     check(`${name} attaches the challenge`, Boolean(error?.data));
     check(`${name} says where to pay`, typeof error?.data?.httpPath === "string", error?.data?.httpPath);
+    // The half that makes the paid tools usable rather than merely priced: an
+    // MCP client cannot build a payment from prose.
+    const accepts = error?.data?.paymentRequired?.accepts;
+    check(`${name} carries a machine-readable challenge`, Array.isArray(accepts) && accepts.length > 0);
+    check(
+      `${name} challenge names scheme, network, amount and payTo`,
+      Boolean(accepts?.[0]?.scheme && accepts?.[0]?.network && accepts?.[0]?.amount && accepts?.[0]?.payTo),
+      verbose && accepts?.[0] ? `${accepts[0].scheme} ${accepts[0].network} ${accepts[0].amount}` : "",
+    );
     if (verbose && error?.data) {
       console.log(`    ${name} data keys: ${Object.keys(error.data).join(", ")}`);
     }

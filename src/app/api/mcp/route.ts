@@ -76,11 +76,39 @@ function toolResult(payload: unknown, isError = false) {
  * purchase made over MCP is therefore indistinguishable in `data/payments.jsonl`
  * from one made over HTTP, which is the point — it is the same sale.
  */
+/**
+ * The x402 challenge is a base64 JSON header, not part of the body.
+ *
+ * Decoded here so an MCP caller receives `accepts[]` — scheme, network, amount,
+ * asset, payTo — as usable JSON rather than a string it has to know to unwrap.
+ * Without this an MCP client can read that it owes a cent and has no
+ * machine-readable way to pay it, which makes the paid tools a dead end.
+ */
+function decodeChallenge(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const normalised = raw.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed: unknown = JSON.parse(Buffer.from(normalised, "base64").toString("utf8"));
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function proxyPaid(
   request: NextRequest,
   path: string,
   args: Record<string, unknown>,
-): Promise<{ status: number; body: unknown }> {
+): Promise<{
+  status: number;
+  body: unknown;
+  /** The decoded x402 challenge, present on a 402. */
+  challenge: Record<string, unknown> | null;
+  /** The raw header, so a client that already speaks x402 can use it unchanged. */
+  challengeHeader: string | null;
+  /** The settlement receipt, present once payment succeeded. */
+  settlement: string | null;
+}> {
   const url = new URL(path, request.nextUrl.origin);
   const limit = Number(args?.limit);
   if (Number.isFinite(limit) && limit > 0) url.searchParams.set("limit", String(limit));
@@ -101,7 +129,15 @@ async function proxyPaid(
     body = { error: `${path} returned ${res.status} with no JSON body` };
   }
 
-  return { status: res.status, body };
+  const challengeHeader = res.headers.get("payment-required");
+
+  return {
+    status: res.status,
+    body,
+    challenge: decodeChallenge(challengeHeader),
+    challengeHeader,
+    settlement: res.headers.get("payment-response"),
+  };
 }
 
 async function dispatch(request: NextRequest, message: {
@@ -160,15 +196,25 @@ async function dispatch(request: NextRequest, message: {
         }
       }
 
-      const { status, body } = await proxyPaid(request, tool.paid.path, args);
+      const { status, body, challenge, challengeHeader, settlement } = await proxyPaid(
+        request,
+        tool.paid.path,
+        args,
+      );
 
       if (status === 402) {
         return err(id, PAYMENT_REQUIRED, `${name} requires payment`, {
-          // Whatever the 402 route said: the challenge and the redacted preview.
+          // Whatever the 402 route said: price, disclosure and the redacted preview.
           ...(body as Record<string, unknown>),
+          // The machine-readable half. `accepts[]` is what a client actually
+          // needs to build a payment, and it lives in a header the JSON body
+          // never carried.
+          paymentRequired: challenge,
+          paymentRequiredHeader: challengeHeader,
           payWith:
-            "Attach the settled x402 payment as an X-PAYMENT header on your next POST " +
-            "to this endpoint, or buy over HTTP at the path below.",
+            "Build an x402 payment from paymentRequired.accepts, then POST this same " +
+            "tools/call again with the result in an X-PAYMENT header. Buying over HTTP " +
+            "at the path below settles identically and lands in the same ledger.",
           httpPath: tool.paid.path,
         });
       }
@@ -177,7 +223,16 @@ async function dispatch(request: NextRequest, message: {
         return ok(id, toolResult({ error: `upstream ${tool.paid.path} returned ${status}`, body }, true));
       }
 
-      return ok(id, toolResult(body));
+      // The receipt. A buyer that paid deserves its transaction hash back
+      // without having to go and look for it.
+      return ok(
+        id,
+        toolResult(
+          settlement
+            ? { ...(body as Record<string, unknown>), paymentResponse: settlement }
+            : body,
+        ),
+      );
     }
 
     default:
