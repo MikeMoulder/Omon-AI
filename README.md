@@ -97,3 +97,60 @@ no signup form and no human in the loop on either side.
 The analysis is not the by-product of the trading. **The analysis is the second product.**
 The same conviction score that sizes Omon's own position is the thing another agent pays
 for, and the payment lands on chain in the same beat.
+
+---
+
+## 2. What we built
+
+One process. Two model-driven agents. Two Binance execution venues. Two payment rails. Two
+MCP implementations pointing in opposite directions. And one layer of plain, deterministic,
+model-free code standing between all of it and money.
+
+```
+                     ┌──────────────────────────────────────────────┐
+   RSS headlines ───►│  INTEL AGENT   (Gemini, structured output)   │
+   (no key, no       │  headline ──► {assets, direction, confidence,│
+    signup)          │                thesis}                       │
+                     └───────────────────┬──────────────────────────┘
+                                         │
+   BINANCE AGENT OS                      ▼
+   ┌──────────────────────────┐   ┌──────────────────────────────────────┐
+   │ 1. MCP    spot_klines    │──►│  SIGNAL AGENT  (Gemini + technicals) │
+   │ 2. Skill Hub  binance-cli│   │  news + chart ──► conviction ──►     │
+   │ 3. REST + HMAC (floor)   │   │  sized, venue-routed trade           │
+   └──────────────────────────┘   └───────────────────┬──────────────────┘
+        every read stamped                            │
+        with the rail that                            ▼
+        served it            ┌──────────────────────────────────────────┐
+                             │  THE BUDGET GATE                         │
+                             │  13 checks · no model · no network       │
+                             │  53 assertions · full trace on every row │
+                             │  ALLOW / BLOCK / REQUIRE_APPROVAL        │
+                             └───────────────────┬──────────────────────┘
+                                                 │ ALLOW only
+                     ┌───────────────────────────┴───────────────┐
+                     ▼                                           ▼
+        BINANCE SPOT DEMO MODE                   BINANCE USDⓈ-M FUTURES
+        real engine · real order ids             perps · signed positions
+        39 fills                                 reduceOnly · 15 fills
+                     │                                           │
+                     └──────────────► FILL LEDGER ◄──────────────┘
+                                  append-only · survives SIGKILL
+                                           │
+                     ┌─────────────────────┼─────────────────────┐
+                     ▼                     ▼                     ▼
+              P&L from real        EXITS: stop, target,     THE CONSOLE
+              fill prices          time-stop, in code       SSE, every 2s
+                                           │
+                                           ▼
+          ┌────────────────────────────────────────────────────────────┐
+          │  OMON SELLS ITS OWN ANALYSIS                               │
+          │  · HTTP  402 at /api/intel and /api/signals                │
+          │  · MCP   6 tools at /api/mcp, 2 of them paid via -32002    │
+          │  · RAILS x402 on Base Sepolia  +  B402 on BNB Smart Chain  │
+          │  · DISCOVERY /.well-known/x402, no directory needed        │
+          └────────────────────────────────────────────────────────────┘
+```
+
+Every box above is running unattended on a public origin as you read this. The console
+draws a live countdown to the next beat, so nobody has to take that on faith.
