@@ -197,7 +197,24 @@ export function exitsFor(args: {
       // A long is closed by selling and a short by buying. Derived from the
       // position's own sign, never from anything a model said.
       side: p.qty > 0 ? "SELL" : "BUY",
-      sizeUsd: p.notionalUsd,
+      // Sized on the LIVE mark, never on `notionalUsd`.
+      //
+      // `notionalUsd` is |qty| * ENTRY. The order path turns a dollar figure back
+      // into a quantity by dividing by the CURRENT mark and flooring to the
+      // symbol's step, so entry dollars buy fewer units whenever price has moved
+      // against the position — which is exactly when a stop fires. A 0.02 BNB
+      // short entered at 739.57 and stopped at 752.71 asked for $14.79, which is
+      // 0.0196 at the mark, which floors to 0.01 on a 0.01 step. Half the
+      // position stayed open on a stop-loss, and the ledger called it closed.
+      //
+      // Sizing at the mark makes the division exact. The 0.1% nudge covers
+      // floating-point error in that round trip, where landing a hair low costs
+      // a whole step. Over-asking is safe here and under-asking is not: every
+      // one of these is reduceOnly, so the exchange caps the fill at the
+      // position and cannot flip it. Spot needs no nudge and gets none — it is
+      // sized from marketValueUsd, already the live mark, and an over-sized spot
+      // sell would bounce with -2010.
+      sizeUsd: Math.abs(p.qty) * p.markPrice * 1.001,
       rule: hit.rule,
       reason: hit.reason,
       unrealizedPct: pct,

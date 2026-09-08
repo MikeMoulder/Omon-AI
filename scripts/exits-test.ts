@@ -146,7 +146,48 @@ check("a long perp closes by selling, reduceOnly", () => {
   const out = run([], [perp({ qty: 0.01, direction: "long", pct: 0.03 })]);
   assert.equal(out[0].side, "SELL");
   assert.equal(out[0].reduceOnly, true);
-  assert.equal(out[0].sizeUsd, 25);
+});
+
+// ── the close must be sized so the whole position actually goes ─────────────
+//
+// Regression for a stop-loss that closed HALF a position and recorded it as
+// closed. sizeUsd was |qty| * ENTRY, but the order path divides by the CURRENT
+// mark and floors to the symbol's step. A 0.02 BNB short entered at 739.57 and
+// stopped at 752.71 asked for $14.79 = 0.0196 at the mark = 0.01 on a 0.01
+// step. Half the short stayed open, still exposed, on the trade whose whole job
+// was to remove the exposure.
+
+check("a futures close is sized on the live mark, not on entry", () => {
+  const out = run([], [perp({ qty: -0.02, direction: "short", entryPrice: 739.57,
+                              notionalUsd: 14.7914, markPrice: 752.71, pct: -0.02 })]);
+  // Entry-based sizing would ask for 14.79. Mark-based asks for ~15.05.
+  assert.ok(out[0].sizeUsd > 15, `expected > $15, got $${out[0].sizeUsd.toFixed(4)}`);
+});
+
+check("dividing the close back by the mark recovers the WHOLE position", () => {
+  const qty = -0.02, markPrice = 752.71, step = 0.01;
+  const out = run([], [perp({ qty, direction: "short", entryPrice: 739.57,
+                              notionalUsd: 14.7914, markPrice, pct: -0.02 })]);
+  // Exactly what placeFuturesOrder does to turn dollars back into units.
+  const recovered = Math.floor((out[0].sizeUsd / markPrice) / step) * step;
+  assert.equal(Number(recovered.toFixed(8)), 0.02);
+});
+
+check("the nudge never rounds a close up past its own step", () => {
+  // Over-asking is safe because these are reduceOnly, but it must not ask for a
+  // whole extra step — on a coarse step that would be a big phantom order.
+  const qty = -0.02, markPrice = 752.71, step = 0.01;
+  const out = run([], [perp({ qty, direction: "short", markPrice, notionalUsd: 14.79, pct: -0.02 })]);
+  const recovered = Math.floor((out[0].sizeUsd / markPrice) / step) * step;
+  assert.ok(recovered <= Math.abs(qty) + 1e-9, `asked for ${recovered}, position is ${Math.abs(qty)}`);
+});
+
+check("an unmoved position still sizes to exactly its own quantity", () => {
+  const qty = 0.017, markPrice = 2500, step = 0.001;
+  const out = run([], [perp({ qty, direction: "long", entryPrice: markPrice,
+                              markPrice, notionalUsd: qty * markPrice, pct: 0.03 })]);
+  const recovered = Math.floor((out[0].sizeUsd / markPrice) / step) * step;
+  assert.equal(Number(recovered.toFixed(8)), 0.017);
 });
 
 check("a short perp closes by buying, reduceOnly", () => {
