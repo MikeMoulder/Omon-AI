@@ -146,10 +146,12 @@ every request.
 | 4 | **Binance USDⓈ-M Futures** testnet | Perpetuals, leverage, `reduceOnly` closes | [`src/lib/futures.ts`](src/lib/futures.ts) | **Live**, order `2635918071` filled |
 | 5 | **Binance Pay / OnchainPay (B402)** `@bnb-chain/b402` | The BSC payment rail, mapped and published | [`src/lib/b402.ts`](src/lib/b402.ts) | **Mapped, preview, not settling** |
 | 6 | **Agent OS discovery conventions** | Publishing which of the above served each read | [`src/lib/service.ts`](src/lib/service.ts) | **Live** |
+| 7 | **MCP, as a server** | Omon serving its own six tools to other agents over the same protocol it reads Binance with | [`src/lib/mcp-server.ts`](src/lib/mcp-server.ts) | **Live**, 39 assertions |
 
-Six surfaces. Two of them exist in this project only because we went looking for a
+Seven surfaces. Two of them exist in this project only because we went looking for a
 second and a third path when the first one closed, and finding those paths is most of
-the engineering story below.
+the engineering story below. The seventh points the other way: Omon does not only
+consume Agent OS, it serves MCP itself. See [4.12](#412-omon-as-an-mcp-server).
 
 ### 4.2 The three-rail read stack
 
@@ -502,6 +504,63 @@ production. The prod-only rows are the finding, and they are expected.
 Live at [`/api/agent-os`](https://www.omon-ai.duckdns.org/api/agent-os) under
 `reachability`, so it is not a claim that only exists in this file.
 
+### 4.12 Omon as an MCP server
+
+Consuming Agent OS makes a project an Agent OS user. **Serving MCP makes it something
+other agents can build on**, which is the direction the platform is actually pointing.
+Omon reads Binance over one MCP connection and publishes its own conclusions over
+another — and because two of those tools are paid, the second connection is a business
+rather than a demo.
+
+```bash
+curl -s https://www.omon-ai.duckdns.org/api/mcp | jq .
+
+curl -s -X POST https://www.omon-ai.duckdns.org/api/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+```
+
+| Tool | Price | What it returns |
+|---|---|---|
+| `omon_rails` | **free** | Which Binance surface served each of the last reads, plus which products are reachable without real money |
+| `omon_pnl` | **free** | Realised and unrealised profit, split by venue, folded from the durable fill ledger |
+| `omon_positions` | **free** | Open spot holdings and perp positions with cost basis and live mark |
+| `omon_gate` | **free** | Recent gate decisions with the full thirteen-check trace and which check refused |
+| `omon_intel` | $0.01 | The Intel Agent's structured read |
+| `omon_signal` | $0.01 | The Signal Agent's conviction, size and thesis |
+
+**Four of six are free on purpose.** Gating everything would make the best feature
+undemonstrable: someone with no wallet could not call the server at all, and "it works,
+trust me" is the exact claim this project refuses to make anywhere else. The four that
+describe what the agent *is* answer to anyone. The two that carry the analysis it sells
+are the product.
+
+**Two design decisions worth naming:**
+
+1. **MCP has no concept of paying for a tool call.** So the 402 rides in the JSON-RPC
+   error envelope: an unpaid call to a paid tool returns code **`-32002`** with the full
+   x402 challenge *and* the same redacted preview the HTTP route serves, so a buyer can
+   still judge the product before spending. Resend with an `X-PAYMENT` header to collect
+   it. That code is Omon's own choice from the implementation-defined range, documented
+   here rather than left to be reverse-engineered from a number.
+2. **The paid tools proxy their own HTTP routes** instead of reimplementing settlement.
+   `omon_intel` self-fetches `/api/intel` with the caller's payment header attached.
+   Settlement, the challenge, the redaction and the purchase log already exist there,
+   correct and tested, and a second implementation inside the MCP layer would be a
+   second thing that can disagree about whether someone paid. It also means **a purchase
+   made over MCP lands in the same `data/payments.jsonl` as one made over HTTP**, with no
+   extra wiring, because it is the same sale.
+
+Both framings are served — `application/json` and `text/event-stream` — because
+[`src/lib/mcp.ts`](src/lib/mcp.ts) parses both, and a server that spoke only one would
+not survive contact with the other half of this codebase.
+
+```bash
+npx tsx scripts/mcp-server-smoke.ts --base https://www.omon-ai.duckdns.org --verbose
+# 39 checks: handshake, six tools, four free tools answering with real data,
+# both paid tools refusing with -32002 and a challenge, SSE framing, error codes
+```
+
 ### 4.11 Verify this whole section in about two minutes
 
 ```bash
@@ -512,6 +571,7 @@ curl https://www.omon-ai.duckdns.org/api/b402 | jq '{status: .b402.status, settl
 npx tsx scripts/skillhub-smoke.ts --verbose   # PASS only if the read came over an Agent OS rail
 npx tsx scripts/mcp-smoke.ts --verbose        # FAILS on a silent REST fallback, by design
 npx tsx scripts/agent-os-matrix.ts --verbose  # which products exist off production, and which do not
+npx tsx scripts/mcp-server-smoke.ts --base https://www.omon-ai.duckdns.org   # Omon answering AS an MCP server
 ```
 
 ---
