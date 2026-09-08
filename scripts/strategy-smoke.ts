@@ -17,7 +17,7 @@ dotenv.config({ path: [".env.local", ".env"], quiet: true });
 if (process.argv.includes("--live")) process.env.DEMO_MODE = "live";
 const CHART_ONLY = process.argv.includes("--chart-only");
 
-import { CANDLE_INTERVAL, exchangeMode, getCandles, getPrices } from "@/lib/exchange";
+import { CANDLE_INTERVAL, MIN_NOTIONAL_USD, exchangeMode, getCandles, getPrices } from "@/lib/exchange";
 import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { llmMode, signalFromIntel } from "@/lib/llm";
 import {
@@ -127,7 +127,18 @@ async function main() {
       JSON.stringify(signal.convictionReasons) === JSON.stringify(own.reasons),
     (signal.convictionReasons ?? []).join(" | "),
   );
-  check("size is inside the model's stated band", signal.sizeUsd >= 5 && signal.sizeUsd <= 50);
+  // Read off the budget, never hardcoded. This assertion said 5..50 while the
+  // ceiling was $100, so it failed on every legal size above $50 — the same
+  // staleness src/lib/llm.ts fixed on the other side of the wire.
+  const band = {
+    floor: Math.max(MIN_NOTIONAL_USD, 5),
+    ceiling: Math.max(5, Math.min(limits.maxTradeUsd, limits.requireApprovalAboveUsd)),
+  };
+  check(
+    "size is inside the model's stated band",
+    signal.sizeUsd >= band.floor && signal.sizeUsd <= band.ceiling,
+    `$${signal.sizeUsd} in $${band.floor}..$${band.ceiling}`,
+  );
   check("signal is traceable to its intel", signal.intelId === intel.id);
   check("conviction rides along on the signal", signal.convictionScore !== undefined);
 
