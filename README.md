@@ -426,7 +426,7 @@ BNBUSDT BUY $20  conviction 0.85 (high)
 
 Every number on the chart half of that came off Binance Agent OS.
 
-### 4.10 Five things we learned about Agent OS that are not in the docs
+### 4.10 Six things we learned about Agent OS that are not in the docs
 
 Offered as the most useful thing this project can hand back to the people who built the
 platform:
@@ -442,6 +442,56 @@ platform:
 4. **The `-1100` error has two causes and one message.** A space after a comma, and a
    lowercase symbol.
 5. **`exec`/`execFile` hang the Skill Hub CLI.** Spawn with stdin ignored.
+6. **`BINANCE_API_ENV` is decided per product, not globally.** Convert, Margin and
+   Wallet accept `prod` and nothing else. The next section is the whole table.
+
+### 4.10b What is reachable without real money
+
+`binance-cli` takes `BINANCE_API_ENV=prod|testnet|demo`. The accepted set turns out to
+be per product, and three products accept `prod` alone:
+
+```text
+PRODUCT         demo     testnet  prod
+spot              ok       ok       ok     <- every price and candle, and spot execution
+futures-usds      ok       ok       ok     <- perpetuals
+convert         REFUSED  REFUSED    ok
+margin-trading  REFUSED  REFUSED   auth
+wallet          REFUSED  REFUSED   auth
+```
+
+`REFUSED` is this, emitted **before any request leaves the machine**:
+
+```text
+Error: Invalid api env, valid values: prod
+```
+
+Because the refusal is client-side, no credential and no `BINANCE_<PRODUCT>_BASE_PATH`
+override reaches past it.
+
+**Three consequences, stated rather than omitted:**
+
+1. **Spot and futures accept demo and testnet.** That is why those are the two venues
+   Omon trades, and it is the mechanism behind "$0 of real money" in [section 1](#1-what-is-real-and-what-is-not)
+   — not restraint, an actual supported path.
+2. **A read-only wallet or custody surface is not reachable off production.** Omon has
+   no custody panel for this reason, and would need production credentials to get one.
+3. **Track B's third task cannot be completed without a funded production account.**
+   The task list is spot, futures, and margin-or-convert; neither Convert nor Margin has
+   a non-production path in Binance's own official CLI. Omon does spot and futures and
+   does not do the third. That is a gap with a reason attached, and the reason is
+   checkable in one command.
+
+Regenerate every cell, including the exit code:
+
+```bash
+npx tsx scripts/agent-os-matrix.ts --verbose
+```
+
+It exits non-zero only if a rail Omon actually depends on has stopped working off
+production. The prod-only rows are the finding, and they are expected.
+
+Live at [`/api/agent-os`](https://www.omon-ai.duckdns.org/api/agent-os) under
+`reachability`, so it is not a claim that only exists in this file.
 
 ### 4.11 Verify this whole section in about two minutes
 
@@ -452,6 +502,7 @@ curl https://www.omon-ai.duckdns.org/api/b402 | jq '{status: .b402.status, settl
 
 npx tsx scripts/skillhub-smoke.ts --verbose   # PASS only if the read came over an Agent OS rail
 npx tsx scripts/mcp-smoke.ts --verbose        # FAILS on a silent REST fallback, by design
+npx tsx scripts/agent-os-matrix.ts --verbose  # which products exist off production, and which do not
 ```
 
 ---
