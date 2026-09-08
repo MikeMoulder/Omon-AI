@@ -38,7 +38,7 @@
  * opinion the Signal Agent gets to have.
  */
 import type { Decision, OrderResult, Signal, Venue } from "@/lib/types";
-import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
+import { evaluateTrade, isClosing, limitsFromEnv } from "@/lib/budget";
 import { getPrices, placeOrder, MIN_NOTIONAL_USD } from "@/lib/exchange";
 import { futuresMark, futuresMinNotional, placeFuturesOrder, placeableNotional } from "@/lib/futures";
 import { computeFuturesPnl, computePnl, drawdownUsd, realizedPnlWindowUsd } from "@/lib/pnl";
@@ -392,13 +392,14 @@ async function beat(opts: {
     }
   }
 
-  const requestedSizeUsd =
+  const proposedSizeUsd =
     opts.sizeUsd !== undefined && Number.isFinite(opts.sizeUsd) && opts.sizeUsd > 0
       ? opts.sizeUsd
       : signal.sizeUsd;
 
   const venue: Venue = signal.venue === "futures" ? "futures" : "spot";
   const leverage = venue === "futures" ? Math.max(1, Math.floor(signal.leverage ?? 1)) : 1;
+
 
   // What this ledger says Omon holds, priced at the live mark. Both branches
   // need a price, and the one call serves both. A price that cannot be read
@@ -412,6 +413,35 @@ async function beat(opts: {
     venue === "futures" &&
     position.perpQty !== 0 &&
     Math.sign(position.perpQty) !== (signal.side === "BUY" ? 1 : -1);
+
+  // Take what is left rather than asking for what is gone.
+  //
+  // The daily cap is a ceiling on the day, not a verdict on the idea. A $75
+  // signal against $43.76 of remaining budget is a $43.76 trade, and refusing
+  // it outright throws away a position the leash would have permitted. The
+  // 2026-09-06..08 run blocked one $75 BNBUSDT idea nine times in 40 minutes
+  // with $43.76 sitting unspent the whole time.
+  //
+  // Only OPENS are trimmed, which is why this sits below `reduceOnly` rather
+  // than up with the proposed size. A close is exempt from the cap entirely
+  // (see src/lib/budget.ts) and has to go out at the size that actually
+  // flattens the position — trimming one would leave a residue and call it
+  // closed, which is the exact bug ae2e179 fixed from the other direction.
+  //
+  // The manual override is exempt too: the demo's BLOCKED beat is a
+  // deliberately oversized trade, and quietly shrinking it into an ALLOW would
+  // delete the one thing that beat exists to show.
+  //
+  // Clamping BEFORE the futures snap is deliberate. If the trimmed figure lands
+  // under the symbol's floor the snap will not lift it — it only closes rounding
+  // gaps, never sizing gaps — and the gate refuses it in words, which is the
+  // honest answer: there is not enough budget left to place a legal order.
+  const closing = isClosing({ venue, side: signal.side, reduceOnly });
+  const remainingTodayUsd = Math.max(0, limitsFromEnv().dailyTradeUsd - spentTodayUsd());
+  const requestedSizeUsd =
+    opts.sizeUsd === undefined && !closing
+      ? Math.min(proposedSizeUsd, remainingTodayUsd)
+      : proposedSizeUsd;
 
   // Round the notional up to something the exchange will actually accept.
   //
@@ -471,9 +501,14 @@ async function beat(opts: {
     intelId: signal.intelId,
     convictionLabel: signal.convictionLabel ?? null,
     ...(venue === "futures" ? { leverage, reduceOnly, marginUsd: sizeUsd / leverage } : {}),
-    ...(requestedSizeUsd === signal.sizeUsd
+    // An operator typed a size. Keyed off `opts.sizeUsd` rather than off a
+    // size comparison, so the budget trim below cannot masquerade as a human.
+    ...(opts.sizeUsd === undefined ? {} : { proposedSizeUsd: signal.sizeUsd, overridden: true }),
+    // The day's remaining budget, not an operator decision and not the
+    // exchange's step. Its own fact for the same reason `snapped` is one.
+    ...(requestedSizeUsd === proposedSizeUsd
       ? {}
-      : { proposedSizeUsd: signal.sizeUsd, overridden: true }),
+      : { preTrimSizeUsd: proposedSizeUsd, trimmed: true, remainingTodayUsd }),
     // The exchange's step, not an operator decision, so it is recorded as its
     // own fact rather than folded into `overridden`.
     ...(sizeUsd === requestedSizeUsd ? {} : { preSnapSizeUsd: requestedSizeUsd, snapped: true }),
