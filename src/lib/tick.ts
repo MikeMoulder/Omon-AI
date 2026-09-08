@@ -42,6 +42,7 @@ import { evaluateTrade, limitsFromEnv } from "@/lib/budget";
 import { getPrices, placeOrder } from "@/lib/exchange";
 import { futuresMark, futuresMinNotional, placeFuturesOrder, placeableNotional } from "@/lib/futures";
 import { computeFuturesPnl, computePnl, drawdownUsd, realizedPnlWindowUsd } from "@/lib/pnl";
+import { exitsFor, type ExitProposal } from "@/lib/exits";
 import { refreshIntel, intelCacheStatus } from "@/lib/intel-cache";
 import { refreshSignals, signalCacheStatus } from "@/lib/signal-cache";
 import { fills, hasTradedSignal, recordAction, recordFill, spentTodayUsd } from "@/lib/ledger";
@@ -186,6 +187,65 @@ async function positionFor(
   };
 }
 
+
+/**
+ * The exit the book is asking for, if any, as a signal.
+ *
+ * Exits ride the existing trade path rather than getting one of their own. That
+ * path already derives `reduceOnly` from the position, snaps the notional to
+ * something the exchange accepts, runs the thirteen-check gate, and writes the
+ * ledger — and a second copy of all of that, reachable only when selling, is
+ * exactly the code that rots and then loses money.
+ *
+ * `intelId` is `"exit"` rather than a real row: nothing was read to reach this
+ * decision. That is the honest value and it keeps exits visible in the ledger as
+ * a distinct kind of trade.
+ */
+async function exitSignal(): Promise<{ signal: Signal; exit: ExitProposal } | null> {
+  const rows = fills();
+  if (rows.length === 0) return null;
+
+  const symbols = [
+    ...new Set([
+      ...computePnl(rows).positions.filter((p) => p.qty > 0).map((p) => p.symbol),
+      ...computeFuturesPnl(rows).positions.filter((p) => p.qty !== 0).map((p) => p.symbol),
+    ]),
+  ];
+  if (symbols.length === 0) return null;
+
+  let marks: Record<string, string> = {};
+  try {
+    marks = await getPrices(symbols);
+  } catch (err) {
+    // No marks, no exits. exitsFor() skips unpriced positions anyway; bailing
+    // here just avoids folding the ledger twice to reach the same answer.
+    console.warn("[tick] could not price open positions:", err);
+    return null;
+  }
+
+  const exit = exitsFor({
+    spot: computePnl(rows, marks).positions,
+    futures: computeFuturesPnl(rows, marks).positions,
+    now: Date.now(),
+  })[0];
+  if (!exit) return null;
+
+  return {
+    exit,
+    signal: {
+      id: `exit_${exit.rule}_${exit.symbol}_${Date.now().toString(36)}`,
+      intelId: "exit",
+      symbol: exit.symbol,
+      side: exit.side,
+      sizeUsd: exit.sizeUsd,
+      venue: exit.venue,
+      leverage: 1,
+      thesis: `${exit.rule}: ${exit.reason}`,
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
 async function beat(opts: {
   force: boolean;
   sizeUsd?: number;
@@ -206,16 +266,22 @@ async function beat(opts: {
     return last;
   };
 
-  const intel = await refreshIntel({ force: opts.force });
+  // Exits run before intel, and that ordering is the whole point. An open
+  // position past its stop is a decision the book has already made; asking a
+  // model for a new opinion first would spend two Gemini calls and a beat to
+  // arrive at it later. When an exit fires this beat skips the model entirely.
+  const exiting = opts.sizeUsd === undefined ? await exitSignal() : null;
+
+  const intel = exiting ? null : await refreshIntel({ force: opts.force });
   const intelStatus = intelCacheStatus();
   const intelRow = {
-    rows: intel.length,
+    rows: intel?.length ?? 0,
     fresh: intelStatus.fresh,
     lastError: intelStatus.lastError,
   };
 
-  const signals = await refreshSignals({ force: opts.force });
-  const signal = signals[0] ?? null;
+  const signals = exiting ? [] : await refreshSignals({ force: opts.force });
+  const signal = exiting ? exiting.signal : (signals[0] ?? null);
 
   if (!signal) {
     // Not a failure. A cold intel cache, a quiet news hour or a model outage all
@@ -238,7 +304,10 @@ async function beat(opts: {
   // them places another order for an idea already acted on. The manual
   // override is exempt: pressing the button to demonstrate a refusal must work
   // on whatever signal is on screen, and a refusal never reaches the exchange.
-  if (opts.sizeUsd === undefined && hasTradedSignal(signal.id)) {
+  // An exit's id is minted fresh each time and was never traded, so this guard
+  // cannot catch one. Checked explicitly anyway: a rule that silently stopped
+  // stops from firing would be the worst possible bug in this file.
+  if (!exiting && opts.sizeUsd === undefined && hasTradedSignal(signal.id)) {
     return finish({
       ok: true,
       skipped: "signal already traded, waiting for new intel",
