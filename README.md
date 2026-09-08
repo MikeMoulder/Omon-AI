@@ -996,3 +996,89 @@ Every command here runs without credentials unless marked otherwise.
 
 **154 offline assertions and 77 live checks, all green, run immediately before this README
 was written.**
+
+---
+
+## 14. Repo map
+
+```
+src/lib/mcp.ts          Binance MCP client (Agent OS). JSON-RPC over Streamable HTTP,
+                        OAuth 2.1 + PKCE + CIMD, tool resolution. READ ONLY BY DESIGN.
+src/lib/mcp-server.ts   Omon AS an MCP server. Six tools, two of them paid, 402 carried
+                        in the JSON-RPC error envelope as -32002.
+src/lib/skillhub.ts     Binance Skill Hub (Agent OS). binance-cli, spawned correctly.
+                        The rail serving today. Batched reads, 3.3x measured.
+src/lib/exchange.ts     The three-rail read stack and spot execution. The only file
+                        that talks to the Binance spot host.
+src/lib/futures.ts      USDⓈ-M perpetuals. Signed positions, stepSize rounding,
+                        reduceOnly, notional-not-margin.
+src/lib/reachability.ts Which Binance products exist off production. The matrix.
+src/lib/b402.ts         Binance OnchainPay mapping: atomic-unit pricing, eip3009, the
+                        extra{} fields the B402 scheme demands. 25 assertions.
+src/lib/x402.ts         The payment seam. The ONLY file routes import for payment.
+                        Three rails behind one variable.
+src/lib/budget.ts       The leash. Thirteen checks, no model, no network. 53 assertions.
+src/lib/exits.ts        When to sell. Stop, target, time-stop. No model. 26 assertions.
+src/lib/strategy.ts     Trend, breakout, conviction. The chart half of every signal.
+src/lib/indicators.ts   EMA/ATR/RSI/priorRange. Pure math, cross-checked bar for bar.
+src/lib/llm.ts          Both agents. Gemini structured output, ceiling from the budget.
+src/lib/tick.ts         One beat of the whole system. Single-flight. Venue routing.
+src/lib/scheduler.ts    The heartbeat's config and reported state. Holds no timer.
+src/lib/store.ts        Durable JSONL + whole-doc JSON. Never throws. Never fatal.
+src/lib/ledger.ts       Money in, money out, and fills. The budget's source of truth.
+src/lib/pnl.ts          Positions and profit from fills. Average cost. Pure functions.
+src/lib/service.ts      What Omon sells, machine-readable. Feeds the manifest AND the
+                        402 preview, so the two cannot drift.
+src/lib/console-state.ts One cheap snapshot of everything the screen shows, every 2s.
+
+src/app/page.tsx                  The console.
+src/app/api/mcp/route.ts          Omon's MCP server endpoint. JSON and SSE framings.
+src/app/api/agent-os/route.ts     Free. Per-seam Agent OS status. Never the token.
+src/app/api/manifest/route.ts     Free. Aliased to /.well-known/x402.
+src/app/api/b402/route.ts         Free. The exact B402 challenge, byte for byte.
+src/app/api/oauth-client/route.ts Our OAuth client metadata. This URL IS our client_id.
+src/app/api/intel/route.ts        PAID. Real 402.
+src/app/api/signals/route.ts      PAID. Real 402.
+src/app/api/cron/tick/route.ts    POST runs one beat, GET reports the last one.
+src/app/api/stream/route.ts       SSE. One full snapshot every 2s.
+
+src/instrumentation.ts  The heartbeat. Holds a timer and a fetch, and NOTHING ELSE.
+                        See section 11, bug 1, before changing this.
+```
+
+**Seam discipline:** `src/lib/*.ts` are the only files that talk to the outside world.
+Routes and components call seams; they never call an SDK or a URL directly. That is what
+makes the fixture fallback work, it is why swapping in the Skill Hub rail took hours rather
+than days, and it is why the payment rail is one environment variable.
+
+**Every seam reports its own mode.** `mcpMode()`, `cliMode()`, `llmMode()`,
+`exchangeMode()`, `futuresMode()`, `b402Readiness()` — each returns `{mode, reason}`.
+**Nothing on screen is ever a guess** about whether something was live.
+
+---
+
+## 15. Where this goes
+
+An agent that funds its own operation by selling what it learns is **a different economic
+object** from an agent that spends a budget someone gave it. The first one can run forever.
+The second one runs until the balance is gone and then becomes a screenshot.
+
+Omon is a working datapoint that every piece now exists:
+
+- **Binance Agent OS** on the read side — MCP, the Skill Hub, and REST beneath both, with
+  the rail that served each number published on every request.
+- **Two live Binance venues** on the execution side, spot and perpetuals, 54 real fills.
+- **Two payment rails** on the revenue side — the open one and Binance's own — behind a
+  single seam.
+- **MCP in both directions**, so what this agent learns is not trapped inside it.
+- And **plain, deterministic, model-free code in the middle**, deciding what the model is
+  allowed to do with any of it.
+
+The interesting version of this is not one agent. It is a market of them: agents buying each
+other's conclusions over MCP, settling on BSC, each one specialised in something the others
+would rather pay a cent for than compute. Everything in this repo is built so that Omon can
+be one node in that market on day one, and so that the second node does not need to ask
+anyone's permission to join.
+
+The console is at **[omon-ai.duckdns.org](https://www.omon-ai.duckdns.org)**. The next beat
+is five minutes away.
