@@ -621,8 +621,8 @@ model is rate-limited, hallucinating, or down.
 futures while spot waited for 2.5%. One number, one meaning — the same rule the budget
 layer already applies to `sizeUsd`.
 
-**Two bugs this found on its first contact with the real ledger**, both of which had been
-sitting there invisibly because nothing ever tried to sell:
+**Three bugs this found on its first contact with the real ledger**, all of which had
+been sitting there invisibly because nothing ever tried to sell:
 
 1. **The agent could not close a position it had accumulated.** A $25 per-trade cap with
    a $1000 daily allowance had let a spot position reach $198 over several beats, and the
@@ -637,6 +637,22 @@ sitting there invisibly because nothing ever tried to sell:
    intel each time. The agent would never have opened another trade. An exit the exchange
    would reject is now not an exit: the beat names the stranded position in the log and
    falls through.
+3. **A stop-loss closed half a position and recorded it as closed.** This is the one that
+   would actually have cost money. The close was sized from `notionalUsd`, which is
+   `|qty| × entry`, but the order path converts dollars back into units by dividing by the
+   **current** mark and flooring to the symbol's step. Entry dollars buy fewer units once
+   price has moved against you — which is precisely when a stop fires. The 0.02 BNB short
+   above, entered at 739.57 and stopped at 752.71, asked for $14.79; that is 0.0196 at the
+   mark, which floors to 0.01 on a 0.01 step. Half the short stayed open, still exposed,
+   on the trade whose entire job was to remove the exposure. Coarse steps make it worse —
+   a two-step position loses half rather than a crumb — and ETHUSDT escaped only because
+   its step is fine enough that the floor happened to land on the position. Futures closes
+   are now sized on the live mark, so the division is exact.
+
+The third one is worth dwelling on, because it is the failure mode this whole section
+exists to prevent and it was *created* by the section itself. An exit that half-fires is
+worse than no exit at all: no exit leaves you exposed and honest, while a half-fill leaves
+you exposed and holding a ledger that says you are flat.
 
 The console shows the distance to all three exits on every open position, so the policy
 is visible before it fires rather than only afterwards.
