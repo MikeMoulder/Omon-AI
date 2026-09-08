@@ -423,3 +423,141 @@ BNBUSDT BUY $20  conviction 0.85 (high)
 ```
 
 Every number on the chart half of that came off Binance Agent OS.
+
+---
+
+## 6. Execution: spot and perpetuals
+
+Two venues, two separate seams, **54 real fills between them**, and not one of them placed
+by a human pressing a button.
+
+### 6.1 Binance Spot, Demo Mode — `src/lib/exchange.ts`
+
+Order execution, hand-rolled REST + HMAC signing. No SDK.
+
+**Demo Mode specifically, and deliberately not Spot Testnet.** Both are free and fund-free,
+but Demo Mode **mirrors the live exchange**: same features, same exchange filters, order
+books tracking the real venue. Testnet runs an independent order book and wipes balances
+monthly. When the strategy computes a position size that Binance's `NOTIONAL` filter would
+reject in production, we want to discover that here, against production's own filters.
+
+Verified: BTCUSDT agreed **within one cent** across mainnet, Demo Mode and Binance MCP — so
+which read rail serves a beat does not move the numbers the strategy runs on.
+
+Real fills on the deployed origin, from the unattended scheduler:
+
+| Order id | Symbol | Side | Quantity | Filled at | Notional |
+|---|---|---|---|---|---|
+| `62348755959` | BTCUSDT | BUY | 0.00018 | 79,850.01 | $14.37 |
+| `62350045713` | BTCUSDT | BUY | 0.00006 | 79,915.15 | $4.79 |
+| `6979890074` | BNBUSDT | BUY | 0.026 | 768.45 | $19.98 |
+| `7061181194` | BNBUSDT | BUY | 0.099 | 750.99 | $74.35 |
+| … | | | | | **39 spot fills total** |
+
+### 6.2 Binance USDⓈ-M Futures — `src/lib/futures.ts`, 710 lines
+
+Its own seam rather than a boolean on the spot one, because **futures is not spot with a
+leverage field bolted on** — and each of these four differences broke something the first
+time it was assumed away:
+
+| Difference | What it broke |
+|---|---|
+| Different host, different key pair | A key that signs Demo Mode returns `-2015` on the futures host. Silent until it isn't |
+| **No `quoteOrderQty`** | Spot lets you say "spend $20". `/fapi/v1/order` demands `quantity` in **base units**, rounded to the symbol's `stepSize`, or it rejects outright. `quantityFor()` is that rounding, and it is not optional |
+| **Positions are signed** | A short is a real position with a negative quantity, not the absence of a long. The entire P&L engine had to learn this |
+| **Notional is not margin** | $20 at 5× posts $4 of margin and carries $20 of exposure. The budget layer checks **notional** on both venues, so one cap means one sentence, and leverage can never quietly multiply the daily limit |
+
+**Why futures at all:** `trendSignal()` has returned `side: "short"` since the very first
+commit, and every short breakout it found was computed and then thrown away, because a spot
+account cannot act on one. **Half the analysis engine was dead code.** This rail made it
+live, and 15 of the 54 fills are perps.
+
+A genuine surprise worth passing on: **the futures testnet accepted the spot demo key
+pair.** We had budgeted time for a second credential dance that turned out to be
+unnecessary — and `futuresMode()` reports which pair is actually in use, so that
+convenience never silently becomes an assumption.
+
+Also fully mapped, because it silently determines what the agent can do at all: **futures
+minimum notionals are per symbol**, and one of them sits above the default approval
+threshold.
+
+| Symbol | Futures floor | Fills unattended at current caps? |
+|---|---|---|
+| BNBUSDT | ~$7.65 | yes |
+| ETHUSDT | $20.00 | yes, in the $20–$25 band |
+| BTCUSDT | $50.00 | only above a $50 approval threshold |
+
+`sizeCeiling` in [`src/lib/llm.ts`](src/lib/llm.ts) is `min(maxTradeUsd,
+requireApprovalAboveUsd)`, so the Signal Agent is told the **true** ceiling and correctly
+never proposes a BTC perp it could not fill. Three numbers, one source, no drift.
+
+### 6.3 What is reachable, mapped exhaustively
+
+`binance-cli` takes `BINANCE_API_ENV=prod|testnet|demo`, and the accepted set turns out to
+be **decided per product** — a finding that is not in any documentation and that determines
+what an unfunded developer can build at all:
+
+```text
+PRODUCT         demo     testnet  prod
+spot              ok       ok       ok     <- every price and candle, and spot execution
+futures-usds      ok       ok       ok     <- perpetuals
+convert         REFUSED  REFUSED    ok
+margin-trading  REFUSED  REFUSED   auth
+wallet          REFUSED  REFUSED   auth
+```
+
+`REFUSED` is emitted **client-side, before any request leaves the machine**:
+
+```text
+Error: Invalid api env, valid values: prod
+```
+
+Because the refusal happens before the network, no credential and no
+`BINANCE_<PRODUCT>_BASE_PATH` override reaches past it.
+
+**Spot and futures accept demo and testnet — which is exactly why those are the two venues
+Omon trades**, and it is the mechanism behind "$0 of real money" on the scoreboard. Not
+restraint. An actual supported path, found by probing every product against every
+environment and writing down the matrix.
+
+```bash
+npx tsx scripts/agent-os-matrix.ts --verbose   # regenerates every cell, including exit code
+```
+
+Published live at [`/api/agent-os`](https://www.omon-ai.duckdns.org/api/agent-os) under
+`reachability`, so it is a fact other agents can read, not a claim that only exists in this
+file.
+
+### 6.4 Agent OS published as machine-readable fact
+
+Every statement in this section is also readable at a URL, without cloning anything. That
+is deliberate: **a README claim is a claim; a live endpoint is evidence.**
+
+| Endpoint | What it publishes | Free? |
+|---|---|---|
+| [`/.well-known/x402`](https://www.omon-ai.duckdns.org/.well-known/x402) | The full catalogue, including an `agentOs` block naming every surface, its tools and its live status | yes |
+| [`/api/agent-os`](https://www.omon-ai.duckdns.org/api/agent-os) | Per-seam mode, tools resolved, token health (never the token), the reachability matrix, and which rail served the last read | yes |
+| [`/api/b402`](https://www.omon-ai.duckdns.org/api/b402) | The exact BSC challenge Omon issues, byte for byte | yes |
+| [`/.well-known/oauth-client`](https://www.omon-ai.duckdns.org/.well-known/oauth-client) | Omon's OAuth client metadata document. This URL **is** its `client_id` | yes |
+| [`/api/mcp`](https://www.omon-ai.duckdns.org/api/mcp) | Omon's own MCP server. Six tools | 4 of 6 |
+
+Two details inside that manifest are worth pointing at directly.
+
+**`poweredBy`, per endpoint.** A buying agent deciding whether to pay for a signal can
+inspect the provenance of what it is buying *before* it spends anything:
+
+```json
+"poweredBy": [
+  "binance-skillhub:spot klines",
+  "binance-skillhub:spot ticker-price",
+  "binance-mcp:spot_klines",
+  "binance-mcp:spot_tickerPrice",
+  "llm:gemini" ]
+```
+
+**`executionPolicy`**, which answers the question a judge would ask, before they ask it:
+
+> "Reads try Binance MCP, then the Skill Hub CLI, then plain REST, and `/api/agent-os`
+> reports which rail actually served the last call. Order writes go through Spot Demo Mode
+> and the USDⓈ-M futures host only. The MCP token authorises a real Binance account, so no
+> order is ever placed over MCP."
