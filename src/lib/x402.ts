@@ -27,6 +27,7 @@
  * degrading a *selected* money rail to a different one behind the operator's
  * back is how a typo'd variable name becomes a silent semantic swap.
  */
+import { NextRequest, type NextResponse } from "next/server";
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
 import type { RouteConfig } from "@x402/core/server";
 import type { Network, SchemeNetworkServer } from "@x402/core/types";
@@ -273,5 +274,61 @@ export function paidRoute(
           : {}),
       },
     }),
+  };
+}
+
+/**
+ * Present the request to x402 under the origin buyers actually reach.
+ *
+ * `@x402/next` builds the challenge's `resource.url` from `request.url`, and
+ * Next constructs that from the port it is bound to rather than from the Host
+ * header — verified by curling `127.0.0.1:3111` with an explicit
+ * `Host: www.omon-ai.duckdns.org` and still getting `localhost:3111` back. So
+ * behind a reverse proxy every 402 advertised its own resource as
+ * `https://localhost:3111/api/intel`.
+ *
+ * Payments settled anyway, because the facilitator verifies scheme, network,
+ * amount, asset and payTo rather than the resource string. But the challenge is
+ * a public document: it is what a buyer reads to decide whether this service is
+ * real, and it is what an agent would record as the thing it bought. Advertising
+ * a loopback address in it is wrong in the way a wrong invoice is wrong.
+ *
+ * Fixed here rather than in Caddy because the Caddyfile serves three other
+ * sites, and because a project should not need a specific proxy configuration
+ * to state its own address correctly.
+ *
+ * GET and HEAD only. Rewriting a request with a body means re-plumbing the
+ * stream, and every paid route here is a GET.
+ *
+ * ## PUBLIC_BASE_URL must be the host buyers actually use
+ *
+ * Not cosmetic. An x402 client checks that the challenge's resource matches what
+ * it asked for, and refuses to pay when they differ — so pointing this at the
+ * public name while testing over localhost makes every purchase silently decline
+ * with `paymentStatus: none`. Set it to whatever origin the request came in on.
+ * Unset, this wrapper does nothing and the old behaviour returns.
+ */
+export function withPublicOrigin(
+  handler: (request: NextRequest) => Promise<NextResponse<unknown>>,
+): (request: NextRequest) => Promise<NextResponse<unknown>> {
+  return (request) => {
+    const base = process.env.PUBLIC_BASE_URL;
+    if (!base || (request.method !== "GET" && request.method !== "HEAD")) {
+      return handler(request);
+    }
+
+    let target: URL;
+    try {
+      target = new URL(`${request.nextUrl.pathname}${request.nextUrl.search}`, base);
+    } catch {
+      // A malformed PUBLIC_BASE_URL must not take the paid route down.
+      return handler(request);
+    }
+
+    if (target.origin === request.nextUrl.origin) return handler(request);
+
+    return handler(
+      new NextRequest(target, { method: request.method, headers: request.headers }),
+    );
   };
 }

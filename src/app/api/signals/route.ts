@@ -23,7 +23,7 @@ import { withX402 } from "@x402/next";
 import { getLatestSignal, getSignals, revalidateSignals } from "@/lib/signal-cache";
 import { previewOfSignal } from "@/lib/service";
 import { withPaymentLog } from "@/lib/payment-log";
-import { paidRoute, paymentServer } from "@/lib/x402";
+import { paidRoute, paymentServer, withPublicOrigin } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
 
@@ -50,29 +50,33 @@ const server = await paymentServer();
 // returns and writes the transaction onto the response header. See payment-log.ts.
 export const GET = withPaymentLog(
   "/api/signals",
-  withX402(
-    handler,
-    {
-      "/api/signals": paidRoute(
-        "Trade signals derived from live news intelligence plus Binance market data, with a stated conviction score",
-        // An unpaid request gets a real row with the actionable fields withheld,
-        // so an agent can judge the product before spending anything on it. The
-        // side and size are the product; the symbol and reasoning are the shop
-        // window.
-        {
-          preview: () => {
-            // Warm the cache from unpaid traffic too. withX402 answers an unpaid
-            // request from here and never reaches `handler`, so revalidating only
-            // there would leave the preview permanently null until the tick runs
-            // — the first agent to discover Omon would see an empty shop window.
-            // Bounded by the same TTL and single-flight guard as every other
-            // caller, so discovery traffic cannot burn the model quota.
-            revalidateSignals();
-            return previewOfSignal(getLatestSignal());
+  // withPublicOrigin sits between the two: the challenge x402 builds must name
+  // the origin a buyer reaches, not the loopback port Next is bound to.
+  withPublicOrigin(
+    withX402(
+      handler,
+      {
+        "/api/signals": paidRoute(
+          "Trade signals derived from live news intelligence plus Binance market data, with a stated conviction score",
+          // An unpaid request gets a real row with the actionable fields withheld,
+          // so an agent can judge the product before spending anything on it. The
+          // side and size are the product; the symbol and reasoning are the shop
+          // window.
+          {
+            preview: () => {
+              // Warm the cache from unpaid traffic too. withX402 answers an unpaid
+              // request from here and never reaches `handler`, so revalidating only
+              // there would leave the preview permanently null until the tick runs
+              // — the first agent to discover Omon would see an empty shop window.
+              // Bounded by the same TTL and single-flight guard as every other
+              // caller, so discovery traffic cannot burn the model quota.
+              revalidateSignals();
+              return previewOfSignal(getLatestSignal());
+            },
           },
-        },
-      ),
-    },
-    server,
+        ),
+      },
+      server,
+    ),
   ),
 );

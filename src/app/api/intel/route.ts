@@ -14,7 +14,7 @@ import { withX402 } from "@x402/next";
 import { getIntel, getLatestIntel, revalidateIntel } from "@/lib/intel-cache";
 import { previewOf } from "@/lib/service";
 import { withPaymentLog } from "@/lib/payment-log";
-import { paidRoute, paymentServer } from "@/lib/x402";
+import { paidRoute, paymentServer, withPublicOrigin } from "@/lib/x402";
 
 export const dynamic = "force-dynamic";
 
@@ -41,16 +41,20 @@ const server = await paymentServer();
 // returns and writes the transaction onto the response header. See payment-log.ts.
 export const GET = withPaymentLog(
   "/api/intel",
-  withX402(
-    handler,
-    {
-      "/api/intel": paidRoute(
-        "Structured, actionable crypto market intelligence derived from live news headlines",
-        // An unpaid request gets a real row with the two paid fields withheld, so
-        // an agent can judge the product before spending anything on it.
-        { preview: () => previewOf(getLatestIntel()) },
-      ),
-    },
-    server,
+  // withPublicOrigin sits between the two: the challenge x402 builds must name
+  // the origin a buyer reaches, not the loopback port Next is bound to.
+  withPublicOrigin(
+    withX402(
+      handler,
+      {
+        "/api/intel": paidRoute(
+          "Structured, actionable crypto market intelligence derived from live news headlines",
+          // An unpaid request gets a real row with the two paid fields withheld, so
+          // an agent can judge the product before spending anything on it.
+          { preview: () => previewOf(getLatestIntel()) },
+        ),
+      },
+      server,
+    ),
   ),
 );
