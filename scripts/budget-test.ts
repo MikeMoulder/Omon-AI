@@ -12,6 +12,7 @@ const LIMITS: BudgetLimits = {
   allowedSymbols: ["BNBUSDT", "BTCUSDT"],
   requireApprovalAboveUsd: 25,
   maxLeverage: 3,
+  maxQuoteAgeMs: 30_000,
 };
 
 // Futures is opt-in, and evaluateTrade() refuses a futures trade on a build
@@ -312,6 +313,63 @@ check("spentToday ignores closes but counts opens", () => {
   // BUY spot 20 counts. Spot SELL is a close. Futures SELL 30 OPENS a short, so
   // it counts. The reduce-only futures BUY is a close.
   assert.equal(total, 50);
+});
+
+
+// ── Check 3: the quote must be fresh ────────────────────────────────────────
+//
+// A mark is an input to the size, so an old one silently voids the per-trade
+// cap: the notional that reaches Binance is not the notional the gate approved.
+
+check("a 2s-old mark is fresh enough to size on", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS, quoteAgeMs: 2_000 });
+  assert.equal(d.decision, "ALLOW");
+});
+
+check("blocks a trade sized off a 45s-old mark", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS, quoteAgeMs: 45_000 });
+  assert.equal(d.decision, "BLOCK");
+  assert.match(d.reason, /45\.0s old/);
+});
+
+check("a negative quote age is refused, not treated as fresh", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS, quoteAgeMs: -1 });
+  assert.equal(d.decision, "BLOCK");
+});
+
+check("a NaN quote age is refused, not treated as fresh", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS, quoteAgeMs: Number.NaN });
+  assert.equal(d.decision, "BLOCK");
+});
+
+check("an unmeasured quote age skips the check rather than assuming fresh", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  assert.equal(d.decision, "ALLOW");
+  assert.equal(d.checks.find((c) => c.name === "quote is fresh")?.status, "skip");
+});
+
+// ── The trace itself ────────────────────────────────────────────────────────
+
+check("an allowed trade records every check it ran", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  assert.ok(d.checks.length >= 10);
+});
+
+check("check numbers are contiguous from 1", () => {
+  const d = evaluateTrade({ symbol: "BNBUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  d.checks.forEach((c, i) => assert.equal(c.n, i + 1));
+});
+
+check("a blocked trade names exactly one failing check", () => {
+  const d = evaluateTrade({ symbol: "DOGEUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  const failed = d.checks.filter((c) => c.status === "fail");
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].name, "symbol is on the allowlist");
+});
+
+check("the trace stops at the check that refused", () => {
+  const d = evaluateTrade({ symbol: "DOGEUSDT", sizeUsd: 20, spentTodayUsd: 0, limits: LIMITS });
+  assert.equal(d.checks.at(-1)?.status, "fail");
 });
 
 console.log(`\n${passed} passed\n`);

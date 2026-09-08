@@ -38,6 +38,14 @@ export type BudgetLimits = {
   requireApprovalAboveUsd: number;
   /** Hard ceiling on futures leverage. Mirrors src/lib/futures.ts MAX_LEVERAGE. */
   maxLeverage: number;
+  /**
+   * Oldest mark that may still be used to size a trade.
+   *
+   * A price is an input to the size, not decoration. Size a $25 order off a
+   * two-minute-old mark on a fast tape and the notional that reaches Binance is
+   * not the notional the gate approved, which quietly voids the per-trade cap.
+   */
+  maxQuoteAgeMs: number;
 };
 
 const DEFAULTS: BudgetLimits = {
@@ -46,6 +54,7 @@ const DEFAULTS: BudgetLimits = {
   allowedSymbols: ["BNBUSDT", "BTCUSDT", "ETHUSDT"],
   requireApprovalAboveUsd: 25,
   maxLeverage: 3,
+  maxQuoteAgeMs: 30_000,
 };
 
 function num(value: string | undefined, fallback: number): number {
@@ -71,6 +80,7 @@ export function limitsFromEnv(): BudgetLimits {
     // Read from the futures seam rather than its own env var, so there is one
     // number and not two that can disagree about what the ceiling is.
     maxLeverage: MAX_LEVERAGE,
+    maxQuoteAgeMs: num(process.env.BUDGET_MAX_QUOTE_AGE_MS, DEFAULTS.maxQuoteAgeMs),
   };
 }
 
@@ -132,6 +142,14 @@ export function evaluateTrade(args: {
    * which is the entire job of this file.
    */
   minNotionalUsd?: number;
+  /**
+   * How old, in milliseconds, the mark used to size this trade is.
+   *
+   * Undefined means the caller did not measure it, and the check is skipped
+   * rather than assumed fresh — a gate that invents a value it was not given is
+   * worse than one that says it did not look.
+   */
+  quoteAgeMs?: number;
 }): Decision {
   const limits = args.limits ?? limitsFromEnv();
   const spent = Math.max(0, args.spentTodayUsd);
@@ -174,6 +192,25 @@ export function evaluateTrade(args: {
     return block("symbol is on the allowlist", `${symbol || "(no symbol)"} is not on the allowlist`);
   }
   pass("symbol is on the allowlist", symbol);
+
+  // Freshness before anything about size, because a stale mark makes every
+  // later size check meaningless: they would all be comparing the right numbers
+  // against the wrong price.
+  if (args.quoteAgeMs !== undefined) {
+    if (!Number.isFinite(args.quoteAgeMs) || args.quoteAgeMs < 0) {
+      return block("quote is fresh", `quote age ${String(args.quoteAgeMs)} is not a valid duration`);
+    }
+    if (args.quoteAgeMs > limits.maxQuoteAgeMs) {
+      return block(
+        "quote is fresh",
+        `the mark is ${(args.quoteAgeMs / 1000).toFixed(1)}s old, past the ` +
+          `${(limits.maxQuoteAgeMs / 1000).toFixed(0)}s limit`,
+      );
+    }
+    pass("quote is fresh", `${(args.quoteAgeMs / 1000).toFixed(1)}s old`);
+  } else {
+    skip("quote is fresh", "caller did not measure the mark's age");
+  }
 
   // Venue gate before anything venue-specific, so a futures order on a build
   // with futures switched off is refused for the reason it was actually
