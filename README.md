@@ -662,3 +662,73 @@ policy is visible *before* it fires rather than only afterwards.
 ```bash
 npx tsx scripts/exits-test.ts   # 26 assertions, fixtures, no clock and no network
 ```
+
+---
+
+## 9. The budget layer: thirteen checks, no model
+
+[`src/lib/budget.ts`](src/lib/budget.ts). **No model. No network. Thirteen checks. 53
+assertions.** Model output is treated as untrusted input, and `sizeUsd` is treated as
+actively hostile.
+
+This is the part of the project with no cleverness in it, and it is the part that makes the
+rest safe to run unattended. **159 of the 241 trades this agent has proposed were refused
+here** — a 66% refusal rate, every one of them recorded with the numbered check that
+refused it.
+
+Every trade runs the whole sequence, cheapest and most absolute first, so the reason
+returned is the most *fundamental* thing wrong rather than whichever rule happened to run
+last. **The gate returns the entire trace, not just the verdict**, and the console draws it
+as thirteen squares under each order.
+
+| # | Check | Default | Refuses when |
+|---|---|---|---|
+| 1 | size is a positive number | — | The model emitted `NaN`, `Infinity`, a negative, or a string that coerced badly |
+| 2 | symbol is on the allowlist | BNB, BTC, ETH | Anything else. Ever |
+| 3 | quote is fresh | 30s | The mark backing the size is older than this. A stale mark silently voids check 9 |
+| 4 | venue is enabled | — | A futures order on a build with futures off |
+| 5 | leverage within ceiling | 3× | Mirrored from the futures seam, so there is one number and not two that can disagree |
+| 6 | spot sell is covered | — | Selling more than Omon's own fills say it holds. Spot cannot short; this would bounce `-2010` |
+| 7 | symbol is tradable at this cap | — | The symbol's floor is above the per-trade cap, so it cannot trade here at *any* size |
+| 8 | size meets the symbol minimum | — | Below the exchange's per-symbol notional floor |
+| 9 | size within per-trade cap | $25 | A single trade larger than this |
+| 10 | daily loss halt | $50 | The trailing 24h is that far down. **Opens only** |
+| 11 | drawdown within limit | $75 | That far below the high-water mark. Does not reset with the day. **Opens only** |
+| 12 | within daily spend cap | $100 | Rolling 24h, from the durable ledger. **Opens only** |
+| 13 | within auto-approve threshold | $25 | Above this, a human decides. Usually the one that actually binds |
+
+Checks 10 and 11 exist because 9, 12 and 13 all bound how much can be **committed**, and
+none of them notices that every one of those trades *lost*. Check 10 catches one bad day;
+check 11 catches three mediocre ones in a row, because it does not reset when the window
+rolls.
+
+Both are denominated in dollars rather than percentages. A percentage needs account equity
+as its denominator, that is not derivable from a fill ledger, and inventing one from cost
+basis would produce a number that looks precise and means nothing.
+
+**Three rules that are safety properties rather than conveniences:**
+
+1. **Closing is never blocked by a spending cap.** The cap counts trades that *increase*
+   exposure and exempts every trade that reduces it. A cap that also throttles exits can
+   leave an agent holding a position it is *forbidden to close*, which is a strictly more
+   dangerous state than the one the cap was protecting against. **An agent must always be
+   able to get out.**
+2. **`sizeUsd` means notional on both venues.** $20 at 3× posts about $6.67 of margin and
+   carries $20 of exposure. The cap checks the $20, so "$100 a day" means one thing on both
+   venues and leverage cannot quietly multiply it. Margin is reported alongside, never
+   instead.
+3. **A check that cannot measure its input skips rather than assuming healthy.** An
+   unmeasured quote age is not "fresh", and an unmeasured drawdown is not "zero". The trace
+   marks those grey, distinct from a pass, so the console never shows the gate doing more
+   work than it actually did. Four of the 53 assertions cover this case alone.
+
+**A refusal that leaves no trace is indistinguishable from having no budget layer at all**,
+so BLOCK is written to the durable ledger with the same weight as a fill, and the console
+renders refusals in the same feed as orders. Force one live, right now:
+
+```bash
+curl -X POST "https://www.omon-ai.duckdns.org/api/cron/tick?sizeUsd=500"
+# BLOCK, with the numbered check that refused it, in the response and in the ledger
+```
+
+The full trace is also available to other agents over MCP, unpaid, as `omon_gate`.
